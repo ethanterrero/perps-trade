@@ -1,0 +1,23 @@
+[package]
+name = "perps-bot"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "perps-bot"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+perps-config = { workspace = true }
+perps-funding = { workspace = true }
+perps-strategy = { workspace = true }
+perps-risk = { workspace = true }
+perps-executor = { workspace = true }
+perps-types = { workspace = true }
+perps-venues = { workspace = true }
+perps-backtest = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

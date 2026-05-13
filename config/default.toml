@@ -1,0 +1,30 @@
+# Default config. Override per environment by setting RUN_ENV=prod (loads config/prod.toml)
+# or via env vars: PERPS_VENUE__HYPERLIQUID__API_URL=...
+
+[venue.hyperliquid]
+api_url = "https://api.hyperliquid-testnet.xyz"
+ws_url = "wss://api.hyperliquid-testnet.xyz/ws"
+testnet = true
+
+[risk]
+# Hard cap on per-asset notional in USD. Bot refuses to size larger.
+max_position_usd = 1000
+# Require this much buffer above liquidation price before opening / holding.
+# 0.30 means liq price must be at least 30% away from mark.
+liq_buffer_pct = 0.30
+# Cap on effective leverage on the short leg.
+max_leverage = 3
+
+[strategy]
+# Assets to monitor for funding opportunities.
+assets = ["BTC", "ETH"]
+# Annualized funding rate threshold for entering a delta-neutral position.
+min_funding_apy_to_enter = 0.10
+# Annualized funding threshold below which we exit (avoid death-by-1000-cuts).
+max_funding_apy_to_exit = 0.02
+# How often to re-evaluate entry/exit decisions.
+decision_interval_seconds = 300
+
+[telemetry]
+log_level = "info"
+state_dir = "state"

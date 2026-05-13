@@ -1,0 +1,9 @@
+[package]
+name = "perps-risk"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+perps-types = { workspace = true }
+rust_decimal = { workspace = true }
+tracing = { workspace = true }

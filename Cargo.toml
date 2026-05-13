@@ -1,0 +1,42 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/perps-types",
+    "crates/perps-config",
+    "crates/perps-venues",
+    "crates/perps-funding",
+    "crates/perps-strategy",
+    "crates/perps-risk",
+    "crates/perps-executor",
+    "crates/perps-backtest",
+    "crates/perps-bot",
+]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+rust_decimal_macros = "1"
+reqwest = { version = "0.12", features = ["json"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+thiserror = "2"
+anyhow = "1"
+config = "0.14"
+dotenvy = "0.15"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+url = "2"
+clap = { version = "4", features = ["derive"] }
+async-trait = "0.1"
+
+# Internal crates
+perps-types = { path = "crates/perps-types" }
+perps-config = { path = "crates/perps-config" }
+perps-venues = { path = "crates/perps-venues" }
+perps-funding = { path = "crates/perps-funding" }
+perps-strategy = { path = "crates/perps-strategy" }
+perps-risk = { path = "crates/perps-risk" }
+perps-executor = { path = "crates/perps-executor" }
+perps-backtest = { path = "crates/perps-backtest" }
