@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Install:
+    cargo build --release
+    mkdir -p ~/Library/Logs/perps-trade ~/Library/LaunchAgents
+    cp ops/launchd/com.perps-trade.bot.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.perps-trade.bot.plist
+
+  Tail logs:
+    tail -f ~/Library/Logs/perps-trade/perps-bot.out.log
+
+  Stop / reload:
+    launchctl unload ~/Library/LaunchAgents/com.perps-trade.bot.plist
+    launchctl load   ~/Library/LaunchAgents/com.perps-trade.bot.plist
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.perps-trade.bot</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/ethanterrero/Desktop/perps-trade/target/release/perps-bot</string>
+        <string>run</string>
+        <string>--config-dir</string>
+        <string>/Users/ethanterrero/Desktop/perps-trade/config</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/ethanterrero/Desktop/perps-trade</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Backoff after a crash so we don't tight-loop on a permanent failure. -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/ethanterrero/Library/Logs/perps-trade/perps-bot.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/ethanterrero/Library/Logs/perps-trade/perps-bot.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+</dict>
+</plist>

@@ -17,8 +17,12 @@ pub struct HyperliquidClient {
 
 impl HyperliquidClient {
     pub fn new(api_url: impl Into<String>) -> Self {
+        let http = Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .expect("reqwest client build");
         Self {
-            http: Client::new(),
+            http,
             api_url: api_url.into(),
         }
     }

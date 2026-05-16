@@ -1223,6 +1223,7 @@ name = "perps-bot"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "perps-backtest",
  "perps-config",
@@ -1232,6 +1233,8 @@ dependencies = [
  "perps-strategy",
  "perps-types",
  "perps-venues",
+ "rust_decimal",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

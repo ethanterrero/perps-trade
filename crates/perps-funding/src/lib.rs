@@ -3,6 +3,9 @@
 //! Phase 1: poll `VenueClient::funding_rate` for each configured asset on a fixed cadence,
 //! log observations, and persist to JSONL for later analysis.
 
+/// File name (within `state_dir`) for the append-only funding-rate log.
+pub const FUNDING_LOG_FILE: &str = "funding.jsonl";
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
