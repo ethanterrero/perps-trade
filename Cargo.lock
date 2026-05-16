@@ -1264,9 +1264,14 @@ dependencies = [
 name = "perps-funding"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "chrono",
  "perps-types",
  "perps-venues",
  "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]
@@ -1307,8 +1312,11 @@ name = "perps-venues"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "perps-types",
  "reqwest",
+ "rust_decimal",
+ "rust_decimal_macros",
  "serde",
  "serde_json",
  "thiserror",
