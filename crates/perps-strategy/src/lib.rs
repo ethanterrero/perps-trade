@@ -52,6 +52,24 @@ impl PortfolioState {
             .iter()
             .find(|p| p.asset.eq_ignore_ascii_case(asset))
     }
+
+    /// Replace any existing position for the same asset and add the new one.
+    /// Phase 2 paper-trade assumes at most one position per asset; if we ever
+    /// model partial adds, this becomes additive instead.
+    pub fn open(&mut self, position: Position) {
+        self.positions
+            .retain(|p| !p.asset.eq_ignore_ascii_case(&position.asset));
+        self.positions.push(position);
+    }
+
+    /// Remove and return the position for `asset`, if any (case-insensitive).
+    pub fn close(&mut self, asset: &str) -> Option<Position> {
+        let idx = self
+            .positions
+            .iter()
+            .position(|p| p.asset.eq_ignore_ascii_case(asset))?;
+        Some(self.positions.remove(idx))
+    }
 }
 
 /// Threshold parameters for the symmetric-funding entry/exit rule. The caller maps
@@ -243,6 +261,42 @@ mod tests {
             decide(&state, &signal("btc", dec!(0.01)), &thresholds(), NOTIONAL),
             Decision::Close { asset: "btc".into() }
         );
+    }
+
+    #[test]
+    fn portfolio_open_replaces_existing_position() {
+        let mut state = PortfolioState::default();
+        state.open(position("BTC", Side::Short));
+        state.open(position("BTC", Side::Long)); // replace, not add
+        assert_eq!(state.positions.len(), 1);
+        assert_eq!(state.positions[0].side, Side::Long);
+    }
+
+    #[test]
+    fn portfolio_open_adds_distinct_assets() {
+        let mut state = PortfolioState::default();
+        state.open(position("BTC", Side::Short));
+        state.open(position("ETH", Side::Long));
+        assert_eq!(state.positions.len(), 2);
+    }
+
+    #[test]
+    fn portfolio_close_removes_and_returns_position() {
+        let mut state = PortfolioState::default();
+        state.open(position("BTC", Side::Short));
+        let closed = state.close("BTC");
+        assert!(closed.is_some());
+        assert_eq!(closed.unwrap().side, Side::Short);
+        assert!(state.positions.is_empty());
+        // Closing again returns None.
+        assert!(state.close("BTC").is_none());
+    }
+
+    #[test]
+    fn portfolio_close_is_case_insensitive() {
+        let mut state = PortfolioState::default();
+        state.open(position("BTC", Side::Short));
+        assert!(state.close("btc").is_some());
     }
 
     #[test]
