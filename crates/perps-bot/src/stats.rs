@@ -2,10 +2,12 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use perps_funding::FUNDING_LOG_FILE;
 use perps_types::FundingRate;
 use rust_decimal::Decimal;
+
+use crate::decisions::{decision_asset, kind_name, DecisionRecord, DECISIONS_LOG_FILE};
 
 /// Per-asset summary derived from the JSONL log.
 struct AssetStats {
@@ -16,6 +18,12 @@ struct AssetStats {
 }
 
 pub fn run(state_dir: &Path) -> anyhow::Result<()> {
+    print_funding(state_dir)?;
+    print_decisions(state_dir)?;
+    Ok(())
+}
+
+fn print_funding(state_dir: &Path) -> anyhow::Result<()> {
     let log_path = state_dir.join(FUNDING_LOG_FILE);
 
     if !log_path.exists() {
@@ -99,6 +107,106 @@ pub fn run(state_dir: &Path) -> anyhow::Result<()> {
             format_pct(s.last.annualized()),
             format_pct(s.min_apy),
             format_pct(s.max_apy),
+        );
+    }
+
+    Ok(())
+}
+
+/// Per-asset summary derived from `decisions.jsonl`.
+struct DecisionSummary {
+    total: usize,
+    open: usize,
+    close: usize,
+    hold: usize,
+    last_kind: &'static str,
+    last_seen: DateTime<Utc>,
+}
+
+fn print_decisions(state_dir: &Path) -> anyhow::Result<()> {
+    let log_path = state_dir.join(DECISIONS_LOG_FILE);
+    if !log_path.exists() {
+        return Ok(());
+    }
+
+    let file = std::fs::File::open(&log_path)?;
+    let reader = BufReader::new(file);
+
+    let mut by_asset: BTreeMap<String, DecisionSummary> = BTreeMap::new();
+    let mut total = 0usize;
+    let mut malformed = 0usize;
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let rec: DecisionRecord = match serde_json::from_str(&line) {
+            Ok(r) => r,
+            Err(_) => {
+                malformed += 1;
+                continue;
+            }
+        };
+        total += 1;
+        let kind = kind_name(&rec.decision);
+        let asset = decision_asset(&rec.decision).to_string();
+        by_asset
+            .entry(asset)
+            .and_modify(|s| {
+                s.total += 1;
+                match kind {
+                    "open" => s.open += 1,
+                    "close" => s.close += 1,
+                    "hold" => s.hold += 1,
+                    _ => {}
+                }
+                if rec.decided_at >= s.last_seen {
+                    s.last_kind = kind;
+                    s.last_seen = rec.decided_at;
+                }
+            })
+            .or_insert_with(|| DecisionSummary {
+                total: 1,
+                open: (kind == "open") as usize,
+                close: (kind == "close") as usize,
+                hold: (kind == "hold") as usize,
+                last_kind: kind,
+                last_seen: rec.decided_at,
+            });
+    }
+
+    if by_asset.is_empty() {
+        return Ok(());
+    }
+
+    println!();
+    println!("decisions from {}", log_path.display());
+    println!(
+        "total: {total} decisions across {} asset(s){}",
+        by_asset.len(),
+        if malformed > 0 {
+            format!(" ({malformed} malformed lines skipped)")
+        } else {
+            String::new()
+        }
+    );
+    println!();
+    println!(
+        "{:<6} {:>7} {:>6} {:>6} {:>6} {:>14} {:>10}",
+        "asset", "total", "open", "close", "hold", "last_seen", "last_kind"
+    );
+    let now = Utc::now();
+    for (asset, s) in &by_asset {
+        println!(
+            "{:<6} {:>7} {:>6} {:>6} {:>6} {:>14} {:>10}",
+            asset,
+            s.total,
+            s.open,
+            s.close,
+            s.hold,
+            format_age(now - s.last_seen),
+            s.last_kind,
         );
     }
 

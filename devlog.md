@@ -4,6 +4,28 @@ Append-only log of decisions, surprises, and changes that aren't obvious from th
 
 ---
 
+## 2026-05-17 — Persist decisions to JSONL + stats decisions section
+
+`decisions.jsonl` is the new sibling to `funding.jsonl`. Every tick that emits a decision now produces a line like:
+
+```json
+{"decided_at":"2026-05-17T03:14:30.434Z","signal_apy":"0.1095000","kind":"open","asset":"BTC","side":"short","notional_usd":"1000"}
+```
+
+The wrapper `DecisionRecord { decided_at, signal_apy, decision }` flattens `Decision`'s own `kind`-tagged serialization so each row is grep-friendly: `kind`, `asset`, and (for `open`) `side`/`notional_usd` are top-level keys, not nested.
+
+**API change: `Decision::Hold` now carries `asset`.** It was a unit variant, but every decision is logically per-asset and the JSONL shape was simpler if every variant exposes `asset` uniformly. Three strategy tests and the `log_decision` matcher updated; small public-API churn that I'd rather take now than after more callers exist.
+
+**Persistence stays sync.** The poll-loop callback is `Fn(&FundingRate)` (not async), so `decisions::append` uses `std::fs` directly. Decisions fire at most once per asset per `decision_interval_seconds` (default 5 min) and the line is ~150 bytes — async/channels would be over-engineering. If we ever batch-write or need backpressure, switch then.
+
+`perps-bot stats` grew a second section. Funding table prints first, then a decisions table with per-asset totals plus counts by kind and the latest decision. Empty/missing decisions.jsonl is handled silently — funding-only state still works for users on Phase 1.
+
+Smoke-tested after a 3-cycle run: 6 funding observations + 6 decisions persisted, both tables rendered cleanly. Verifies the callback fires after the funding write (so we never have a decision without its corresponding observation on disk).
+
+Tests: 15 across the workspace (was 13). Two new in `perps-bot::decisions` — JSON shape and JSONL roundtrip via `tempfile`.
+
+---
+
 ## 2026-05-16 — Wire decide into perps-bot (dry-run)
 
 The strategy stub is now plumbed into the run loop. Each successful funding fetch fans out to `decide` with an empty `PortfolioState` (we have no live positions yet) and the decision gets logged via structured tracing — no orders, no JSONL for decisions, just observability.

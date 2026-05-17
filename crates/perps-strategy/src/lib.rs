@@ -25,8 +25,8 @@ pub enum Decision {
     },
     /// Exit our existing position in `asset`.
     Close { asset: String },
-    /// Do nothing this tick.
-    Hold,
+    /// Do nothing this tick (for `asset`).
+    Hold { asset: String },
 }
 
 /// Per-asset funding-rate signal, pre-annualized so the strategy is agnostic to the
@@ -88,7 +88,9 @@ pub fn decide(
                 asset: signal.asset.clone(),
             };
         }
-        return Decision::Hold;
+        return Decision::Hold {
+            asset: signal.asset.clone(),
+        };
     }
 
     if signal.apy >= thresholds.min_apy_to_enter {
@@ -106,7 +108,9 @@ pub fn decide(
         };
     }
 
-    Decision::Hold
+    Decision::Hold {
+        asset: signal.asset.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -149,11 +153,11 @@ mod tests {
         let state = PortfolioState::default();
         assert_eq!(
             decide(&state, &signal("BTC", dec!(0.05)), &thresholds(), NOTIONAL),
-            Decision::Hold
+            Decision::Hold { asset: "BTC".into() }
         );
         assert_eq!(
             decide(&state, &signal("BTC", dec!(-0.05)), &thresholds(), NOTIONAL),
-            Decision::Hold
+            Decision::Hold { asset: "BTC".into() }
         );
     }
 
@@ -220,7 +224,7 @@ mod tests {
         };
         assert_eq!(
             decide(&state, &signal("BTC", dec!(0.05)), &thresholds(), NOTIONAL),
-            Decision::Hold
+            Decision::Hold { asset: "BTC".into() }
         );
     }
 
