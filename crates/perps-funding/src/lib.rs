@@ -26,12 +26,21 @@ struct Observation<'a> {
 
 /// Run the poll loop until ctrl-c. One tick fires immediately, then every `interval`.
 /// Per-asset errors are logged and skipped; the loop only exits on signal.
-pub async fn poll_loop(
+///
+/// `on_observation` is invoked synchronously after each successful fetch is
+/// persisted. It's the seam where higher layers (strategy, executor) react to
+/// observations without `perps-funding` having to depend on them. Pass a no-op
+/// closure if you only care about persistence.
+pub async fn poll_loop<F>(
     client: Arc<dyn VenueClient>,
     assets: Vec<String>,
     interval: Duration,
     out_path: PathBuf,
-) -> anyhow::Result<()> {
+    on_observation: F,
+) -> anyhow::Result<()>
+where
+    F: Fn(&FundingRate) + Send + Sync + 'static,
+{
     if let Some(parent) = out_path.parent() {
         if !parent.as_os_str().is_empty() {
             tokio::fs::create_dir_all(parent).await?;
@@ -50,7 +59,7 @@ pub async fn poll_loop(
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                poll_once(client.as_ref(), &assets, &out_path).await;
+                poll_once(client.as_ref(), &assets, &out_path, &on_observation).await;
             }
             _ = tokio::signal::ctrl_c() => {
                 info!("ctrl-c received, exiting poll loop");
@@ -60,7 +69,14 @@ pub async fn poll_loop(
     }
 }
 
-async fn poll_once(client: &dyn VenueClient, assets: &[String], out_path: &Path) {
+async fn poll_once<F>(
+    client: &dyn VenueClient,
+    assets: &[String],
+    out_path: &Path,
+    on_observation: &F,
+) where
+    F: Fn(&FundingRate),
+{
     for asset in assets {
         match client.funding_rate(asset).await {
             Ok(fr) => {
@@ -76,6 +92,7 @@ async fn poll_once(client: &dyn VenueClient, assets: &[String], out_path: &Path)
                 if let Err(e) = append_jsonl(out_path, &obs).await {
                     error!(error = %e, asset = %asset, "failed to write observation");
                 }
+                on_observation(&fr);
             }
             Err(e) => {
                 warn!(error = %e, asset = %asset, "funding fetch failed");

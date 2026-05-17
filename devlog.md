@@ -4,6 +4,26 @@ Append-only log of decisions, surprises, and changes that aren't obvious from th
 
 ---
 
+## 2026-05-16 — Wire decide into perps-bot (dry-run)
+
+The strategy stub is now plumbed into the run loop. Each successful funding fetch fans out to `decide` with an empty `PortfolioState` (we have no live positions yet) and the decision gets logged via structured tracing — no orders, no JSONL for decisions, just observability.
+
+**Architecture call: `poll_loop` got a per-observation callback.** `perps-funding::poll_loop` now takes `on_observation: Fn(&FundingRate)` as a generic parameter and invokes it after each successful fetch is persisted. The alternative was to put strategy invocation inside `perps-funding`, but that'd make the observation crate depend on the decision crate — wrong direction. The callback keeps `perps-funding` ignorant of `perps-strategy`; `perps-bot` is where the two worlds meet.
+
+**Mapping at the call site.** `perps-bot::run` builds a `Thresholds` from `StrategySettings` and reads `max_position_usd` from `RiskSettings`. The closure converts each `FundingRate → FundingSignal` (`apy = fr.annualized()`) and emits a single `dry-run decision` log line with `kind = open|close|hold`. The `kind` field matches the `Decision` serde tag so future log-querying is consistent across structured-log and decisions-JSONL once that arrives.
+
+`log_decision` is split out as a separate function rather than inlined because the `Decision::Open` arm has three extra fields the others don't, and a single `info!` with `Option`-fields would be uglier than a match.
+
+Smoke run against testnet — three cycles, two assets, six decisions. Sample line (BTC at ~29% APY, well above the 10% enter threshold):
+
+```json
+{"message":"dry-run decision","asset":"BTC","apy":"0.2939260320","side":"Short","notional_usd":"1000","kind":"open"}
+```
+
+**Not yet wired:** real positions in `PortfolioState`, decisions persisted to JSONL, the executor consuming them. Those are separate PRs — the next obvious one is decisions JSONL so we can build a `perps-bot stats` extension that reports decision history alongside funding history.
+
+---
+
 ## 2026-05-16 — Phase 2 stub: perps-strategy::decide
 
 Pure-logic stub for the delta-neutral entry/exit rule. `decide(state, signal, thresholds, max_notional) -> Decision` where `Decision` is `Open { asset, side, notional_usd } | Close { asset } | Hold`. No I/O, no async, no wiring into the bot yet — that's the next chunk once the observe loop has banked a couple of days of data.
