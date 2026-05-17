@@ -4,6 +4,20 @@ Append-only log of decisions, surprises, and changes that aren't obvious from th
 
 ---
 
+## 2026-05-17 — Refuse-open gate wired to executor
+
+Phase 3 #1: before persisting an Open fill, the bot computes the would-be liquidation buffer for the prospective position and skips the open if it's below `risk.liq_buffer_pct` (default 0.30 = 30%). The decision still goes to `decisions.jsonl` (strategy intent is preserved); the absence of a matching fill in `fills.jsonl` is the audit trail of the refusal.
+
+**At leverage 1 the gate is functionally inert** — buffer is `(1 − mmr) / leverage = 0.995` regardless of asset or price, well above any sane threshold. The check is wired correctly now so Phase 4 (real leverage, real signing) doesn't have to remember to add it. Verified by setting `PERPS_RISK__LIQ_BUFFER_PCT=0.999` to force a refusal — every Open got vetoed with `buffer=0.995 < min_buffer=0.999`, and `fills.jsonl` stayed empty while `decisions.jsonl` accumulated `kind=open` rows as expected.
+
+**Sign on the gate's audit trail:** decision logged, no fill logged. A future digest could count `decisions.jsonl` Open rows minus matching `fills.jsonl` Open rows to surface refusal rate. Not building that helper today — the warn-level log already lands in stderr.
+
+**Defensive: `breach_buffer` is just `<`.** No new function in `perps-risk` — the existing `liquidation_buffer_pct` plus a one-line comparison at the call site is more legible than a helper. If we ever add additional gating logic (notional cap, leverage cap, drift cap), we'll consolidate.
+
+No new tests; the underlying `liquidation_buffer_pct` is already covered. Integration verified by smoke run.
+
+---
+
 ## 2026-05-17 — Persisted portfolio across restarts
 
 `launchd` will respawn the bot if it dies. Before this change, the respawned process started with `PortfolioState::default()` — empty — so it would re-Open everything that was actually still held on the exchange. After this change, startup replays `fills.jsonl` via `pnl::restore_portfolio` and seeds the in-memory portfolio with the still-open positions before the first poll.
