@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = { workspace = true }
+chrono = { workspace = true }
 clap = { workspace = true }
 perps-config = { workspace = true }
 perps-funding = { workspace = true }
@@ -18,6 +19,8 @@ perps-executor = { workspace = true }
 perps-types = { workspace = true }
 perps-venues = { workspace = true }
 perps-backtest = { workspace = true }
+rust_decimal = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

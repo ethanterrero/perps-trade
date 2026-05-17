@@ -74,6 +74,7 @@ pub fn load(config_dir: impl AsRef<Path>) -> Result<Settings, ConfigError> {
 
     builder = builder.add_source(
         config::Environment::with_prefix("PERPS")
+            .prefix_separator("_")
             .separator("__")
             .try_parsing(true),
     );
