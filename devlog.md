@@ -4,6 +4,39 @@ Append-only log of decisions, surprises, and changes that aren't obvious from th
 
 ---
 
+## 2026-05-17 — PnL attribution + `perps-bot digest`
+
+End-to-end paper-trade now has a measurable PnL. `perps-bot digest` reads `fills.jsonl` + `funding.jsonl` and emits a per-asset summary: realized (closed trades), unrealized (open positions vs. latest mid), funding accrued (step-integrated over each position's lifetime). This is the closing piece for "ready to paper trade" — without it the bot is trading but invisible.
+
+**Schema bump: `funding.jsonl` now carries `mid_price`.** The PnL digest needs current mid for unrealized PnL on open positions, and `funding.jsonl` is the canonical record of what the bot has seen. Adding the field to the `Observation` struct in `perps-funding` was the smallest cut — already in `MarketSnapshot`, just needed to flow into the persisted row. Old log entries from before this PR won't deserialize through `LoggedFunding`; this is fine, the JSONL is internal and ephemeral.
+
+**Funding accrual is step-integrated, not continuous.** For each pair of consecutive observations during a position's lifetime, we apply the earlier observation's rate for the duration until the next one. The pre-first segment uses the first observation's rate; the post-last uses the last. Real funding is paid in discrete events per funding period (1h on Hyperliquid), and we don't model that yet — for paper-trade ballparks the step approximation is more than enough.
+
+**Sign convention codified in `pnl::accrued_funding`:** positive rate → Short earns, Long pays. Mirrors the strategy's open-direction logic. Three unit tests cover Short/Long sign + step integration with changing rates.
+
+**Pairing logic:** Opens and Closes get matched per-asset in time order. If an Open appears without a matching Close, it becomes an `OpenTrade` (unrealized PnL). If a Close appears with no preceding Open, it's dropped silently — shouldn't happen given the portfolio tracker, but the code tolerates it.
+
+Sample digest from a 9-second smoke run (default config, BTC + ETH both Open + Hold):
+
+```
+period: 2026-05-17T03:44:03Z → 2026-05-17T03:44:12Z (9s)
+fills: 2  observations: 8  open positions: 2  closed trades: 0
+
+asset   trades  open     realized   unrealized      funding        total
+BTC          0     1           $0     -$0.1151      $0.0002     -$0.1149
+ETH          0     1           $0      $0.0457      $0.0055      $0.0512
+
+totals: realized $0  unrealized -$0.0694  funding $0.0058  net -$0.0636
+```
+
+The unrealized numbers reflect actual testnet price movement between fill time and the latest observation. Funding numbers are small because the window is 9 seconds; a 24h run will show meaningful funding capture.
+
+Tests: 36 across the workspace (was 25). Nine new in `perps-bot::pnl` covering pairing, realized/unrealized PnL math, funding sign convention, step integration, asset filtering, and `latest_mids`. One existing `perps-funding` test renamed to reflect the new `mid_price` field.
+
+**Phase 2 readiness:** With observe → decide → fill → portfolio → digest all in place, the bot can paper-trade end-to-end. The remaining roadmap items (`perps-risk` margin/liq calc, multi-venue support) are Phase 3+. Calling Phase 2 ready.
+
+---
+
 ## 2026-05-17 — Portfolio tracker: positions persist across ticks
 
 The "re-open every tick" gap from the previous PR is closed. `PortfolioState` is now mutable across the bot's run; the strategy sees real positions and emits `Open → Hold → Close` rather than `Open → Open → Open`.
