@@ -6,6 +6,8 @@ use std::path::Path;
 
 use chrono::Utc;
 use perps_executor::FILLS_LOG_FILE;
+use perps_risk::{liquidation_buffer_pct, liquidation_price, DEFAULT_MAINTENANCE_MARGIN_RATIO};
+use perps_types::Position;
 use rust_decimal::Decimal;
 
 use crate::pnl;
@@ -36,6 +38,14 @@ pub fn run(state_dir: &Path) -> anyhow::Result<()> {
 
     let mut rows: BTreeMap<String, AssetPnl> = BTreeMap::new();
     let now = Utc::now();
+    // For still-open positions, funding accrual ends at the most recent
+    // observation rather than `now`. Wall-clock time after we stopped
+    // polling isn't observable — pretending it accrues at the last seen
+    // rate overstates funding when the digest runs hours after the bot.
+    let last_observed = observations
+        .last()
+        .map(|o| o.observed_at)
+        .unwrap_or(now);
 
     for trade in &closed {
         let funding = pnl::accrued_funding(
@@ -63,7 +73,7 @@ pub fn run(state_dir: &Path) -> anyhow::Result<()> {
             trade.side,
             trade.open.notional_usd,
             trade.open.filled_at,
-            now,
+            last_observed,
             &observations,
         );
         let row = rows.entry(key).or_default();
@@ -143,7 +153,55 @@ pub fn run(state_dir: &Path) -> anyhow::Result<()> {
         format_usd(grand_total),
     );
 
+    if !open.is_empty() {
+        println!();
+        println!("open positions:");
+        println!(
+            "{:<6} {:<6} {:>14} {:>12} {:>12} {:>14} {:>10}",
+            "asset", "side", "size", "entry", "mark", "liq_price", "buffer"
+        );
+        for trade in &open {
+            let key = trade.asset.to_ascii_uppercase();
+            let mark = mids.get(&key).copied().unwrap_or(trade.open.price);
+            let position = Position {
+                venue: trade.open.venue,
+                asset: trade.asset.clone(),
+                side: trade.side,
+                size: trade.open.size,
+                entry_price: trade.open.price,
+                leverage: Decimal::ONE,
+                margin_used: trade.open.notional_usd,
+                liquidation_price: None,
+            };
+            let liq = liquidation_price(&position, DEFAULT_MAINTENANCE_MARGIN_RATIO);
+            let buf = liquidation_buffer_pct(&position, mark, DEFAULT_MAINTENANCE_MARGIN_RATIO);
+            let side = match trade.side {
+                perps_types::Side::Long => "long",
+                perps_types::Side::Short => "short",
+            };
+            println!(
+                "{:<6} {:<6} {:>14} {:>12} {:>12} {:>14} {:>10}",
+                trade.asset,
+                side,
+                format_decimal(position.size, 6),
+                format_decimal(position.entry_price, 2),
+                format_decimal(mark, 2),
+                format_decimal(liq, 2),
+                format_pct(buf),
+            );
+        }
+    }
+
     Ok(())
+}
+
+fn format_decimal(d: Decimal, dp: u32) -> String {
+    format!("{}", d.round_dp(dp).normalize())
+}
+
+fn format_pct(d: Decimal) -> String {
+    let pct = (d * Decimal::from(100)).round_dp(1);
+    format!("{pct}%")
 }
 
 fn format_usd(d: Decimal) -> String {

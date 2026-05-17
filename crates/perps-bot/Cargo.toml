@@ -16,6 +16,7 @@ perps-funding = { workspace = true }
 perps-strategy = { workspace = true }
 perps-risk = { workspace = true }
 perps-executor = { workspace = true }
+# (perps-risk used by digest module for liq calc)
 perps-types = { workspace = true }
 perps-venues = { workspace = true }
 perps-backtest = { workspace = true }

@@ -4,6 +4,40 @@ Append-only log of decisions, surprises, and changes that aren't obvious from th
 
 ---
 
+## 2026-05-17 — `perps-risk` module + digest "open positions" section
+
+Closes the last open Phase 2 item from the roadmap: `perps-risk` computes notional, simulated margin usage, and would-be liquidation prices. Phase 2 ships compute-only — enforcement (refuse-open gates, kill-switch handler) is Phase 3 when we wire it to the executor's decision.
+
+**Liquidation formula:** isolated-margin convention.
+- Long: `entry × (1 − (1 − mmr) / leverage)`
+- Short: `entry × (1 + (1 − mmr) / leverage)`
+
+Maintenance margin ratio defaults to 0.5% (Hyperliquid majors). Smaller alts use higher ratios (1–3%) — per-asset overrides can be added when we trade non-majors.
+
+At leverage 1 (our paper-trade default) the liq prices are at the extreme tails: ~2× entry for a Short, ~0.5% of entry for a Long. Verified in the digest output:
+
+```
+open positions:
+asset  side             size        entry         mark      liq_price     buffer
+BTC    short        0.012789        78193        78202      155995.04      99.5%
+ETH    short        0.456976       2188.3       2188.2        4365.66      99.5%
+```
+
+The 99.5% buffer falls out of `(1 − mmr) / leverage = 0.995 / 1` as expected. Same code at 5× leverage gives ~19.9% buffer — math checks for higher-leverage Phase 4 mainnet without refactor.
+
+**Defensive choices:**
+- Leverage ≤ 1 clamped to 1 in `liquidation_price` (sub-1× doesn't make sense and is usually a config error).
+- Zero leverage treated as 1× in `margin_used` (rather than panicking on div-by-zero).
+- `liquidation_buffer_pct` returns 0 if mark_price ≤ 0 (degenerate but tolerated).
+
+**Digest funding-accrual fix:** for still-open positions, funding now accrues up to the latest observation time, not `Utc::now()`. Wall-clock time after the bot stopped polling isn't observable; using `now` overstated funding when the digest ran hours after the bot. The "open positions" section also uses the latest observation as the mark.
+
+Tests: 47 across the workspace (was 36). Eleven new in `perps-risk` covering notional, margin (1x / 5x / zero-leverage edge case), liq price (Long/Short at multiple leverages), liq buffer (safe + already-past-liq), and portfolio aggregates with the mark-lookup fallback to entry.
+
+**Phase 2 complete.** Four roadmap items: strategy ✓, executor dry-run ✓, risk module ✓, PnL attribution ✓. The exit criterion (2 weeks of testnet soak with simulated PnL matching reality) is execution time, not coding. Ready to paper trade.
+
+---
+
 ## 2026-05-17 — PnL attribution + `perps-bot digest`
 
 End-to-end paper-trade now has a measurable PnL. `perps-bot digest` reads `fills.jsonl` + `funding.jsonl` and emits a per-asset summary: realized (closed trades), unrealized (open positions vs. latest mid), funding accrued (step-integrated over each position's lifetime). This is the closing piece for "ready to paper trade" — without it the bot is trading but invisible.

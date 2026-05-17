@@ -6,4 +6,5 @@ edition = "2021"
 [dependencies]
 perps-types = { workspace = true }
 rust_decimal = { workspace = true }
+rust_decimal_macros = { workspace = true }
 tracing = { workspace = true }
