@@ -4,6 +4,24 @@ Append-only log of decisions, surprises, and changes that aren't obvious from th
 
 ---
 
+## 2026-05-17 — Portfolio tracker: positions persist across ticks
+
+The "re-open every tick" gap from the previous PR is closed. `PortfolioState` is now mutable across the bot's run; the strategy sees real positions and emits `Open → Hold → Close` rather than `Open → Open → Open`.
+
+**Concurrency choice: `Arc<Mutex<PortfolioState>>`** in `perps-bot`, not changing the callback bound. The `poll_loop` callback is `Fn(&MarketSnapshot)` (immutable). Switching the trait bound to `FnMut` would require `&mut F` plumbing through async, which is fiddly. The closure is invoked serially from a single tokio task, so the Mutex never actually contends — it's just there to satisfy the type system. Cheap and correct.
+
+**`PortfolioState::open` and `close`** added in `perps-strategy`. Open replaces any existing position for the asset (Phase 2 assumes at most one position per asset); future additive-fills will change this. Close returns `Option<Position>` so callers can build the closing order from the position's actual side and size.
+
+**Close path in the bot:** strategy emits `Decision::Close { asset }`, bot pops the position out of the portfolio, builds an `Order` with `side.flip()` and `reduce_only: true`, calls `simulate_fill(..., FillIntent::Close)`, persists. Closing the same size we opened — no scaling, no partials.
+
+Smoke run with default config (BTC ~11% APY, ETH ~250% APY, both above 10% entry / above 2% exit): tick 1 opens both, ticks 2+ hold. 6 decisions, 2 fills. Same setup with `MAX_FUNDING_APY_TO_EXIT=100` forces close on every other tick → open/close oscillation, 8 fills across 4 cycles. Side flips on close as expected (Short open → Long close).
+
+Real testnet captured a $4 unfavorable price move between open ($78,152.5) and close ($78,156.5) on BTC Short. PnL attribution lands in PR #8; for now the close fill records the price honestly.
+
+Tests: 25 across the workspace (was 21). Four new in `perps-strategy` for `open`/`close` mutation paths including case-insensitive lookup.
+
+---
+
 ## 2026-05-17 — Executor dry-run + MarketSnapshot + fills.jsonl
 
 Phase 2 paper-trade pipeline is now end-to-end: funding observation → decide → simulate fill → persist Fill. Three JSONL streams (`funding.jsonl`, `decisions.jsonl`, `fills.jsonl`) and `perps-bot stats` shows all three.

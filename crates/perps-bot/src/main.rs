@@ -1,12 +1,12 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use perps_executor::{simulate_fill, FillIntent, FILLS_LOG_FILE};
 use perps_funding::FUNDING_LOG_FILE;
 use perps_strategy::{decide, Decision, FundingSignal, PortfolioState, Thresholds};
-use perps_types::{MarketSnapshot, Order};
+use perps_types::{MarketSnapshot, Order, Position};
 use perps_venues::hyperliquid::HyperliquidClient;
 use perps_venues::VenueClient;
 use rust_decimal::Decimal;
@@ -92,61 +92,118 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
         max_apy_to_exit: settings.strategy.max_funding_apy_to_exit,
     };
     let max_notional = settings.risk.max_position_usd;
-    // Phase 2 dry-run: no live positions yet, so the strategy sees an empty portfolio.
-    // Mutable state across ticks lands in a follow-up PR (portfolio tracker).
-    let portfolio = PortfolioState::default();
+    // PortfolioState lives in an Arc<Mutex<_>> so the poll-loop's `Fn` callback
+    // (called serially from one tokio task) can read it for `decide` and mutate
+    // it after a fill, without us changing the callback bound to FnMut.
+    let portfolio = Arc::new(Mutex::new(PortfolioState::default()));
 
-    let on_snapshot = move |snapshot: &MarketSnapshot| {
-        let fr = &snapshot.funding;
-        let signal = FundingSignal {
-            venue: fr.venue,
-            asset: fr.asset.clone(),
-            apy: fr.annualized(),
-        };
-        let decision = decide(&portfolio, &signal, &thresholds, max_notional);
-        log_decision(&signal, &decision);
+    let on_snapshot = {
+        let portfolio = Arc::clone(&portfolio);
+        move |snapshot: &MarketSnapshot| {
+            let fr = &snapshot.funding;
+            let signal = FundingSignal {
+                venue: fr.venue,
+                asset: fr.asset.clone(),
+                apy: fr.annualized(),
+            };
+            let decision = {
+                let p = portfolio.lock().expect("portfolio mutex poisoned");
+                decide(&p, &signal, &thresholds, max_notional)
+            };
+            log_decision(&signal, &decision);
 
-        // Simulate a fill when the decision says Open. The portfolio tracker (next
-        // PR) is what makes Close act on a real position; today we'd close nothing
-        // since the portfolio is always empty, so we skip Close in dry-run.
-        if let Decision::Open {
-            asset,
-            side,
-            notional_usd,
-        } = &decision
-        {
-            if snapshot.mid_price > Decimal::ZERO {
-                let size = notional_usd / snapshot.mid_price;
-                let order = Order {
-                    venue: fr.venue,
-                    asset: asset.clone(),
-                    side: *side,
-                    size,
-                    limit_price: None,
-                    reduce_only: false,
-                    client_id: Uuid::new_v4(),
-                };
-                let fill = simulate_fill(&order, snapshot.mid_price, FillIntent::Open);
-                info!(
-                    asset = %fill.asset,
-                    side = ?fill.side,
-                    size = %fill.size,
-                    price = %fill.price,
-                    notional_usd = %fill.notional_usd,
-                    intent = "open",
-                    "simulated fill"
-                );
-                if let Err(e) = perps_executor::append(&fills_path, &fill) {
-                    warn!(error = %e, "failed to persist fill");
+            match &decision {
+                Decision::Open {
+                    asset,
+                    side,
+                    notional_usd,
+                } => {
+                    if snapshot.mid_price <= Decimal::ZERO {
+                        warn!(asset = %asset, "mid price non-positive, skipping fill");
+                    } else {
+                        let size = notional_usd / snapshot.mid_price;
+                        let order = Order {
+                            venue: fr.venue,
+                            asset: asset.clone(),
+                            side: *side,
+                            size,
+                            limit_price: None,
+                            reduce_only: false,
+                            client_id: Uuid::new_v4(),
+                        };
+                        let fill = simulate_fill(&order, snapshot.mid_price, FillIntent::Open);
+                        info!(
+                            asset = %fill.asset,
+                            side = ?fill.side,
+                            size = %fill.size,
+                            price = %fill.price,
+                            notional_usd = %fill.notional_usd,
+                            intent = "open",
+                            "simulated fill"
+                        );
+                        if let Err(e) = perps_executor::append(&fills_path, &fill) {
+                            warn!(error = %e, "failed to persist fill");
+                        }
+                        let position = Position {
+                            venue: fr.venue,
+                            asset: asset.clone(),
+                            side: *side,
+                            size: fill.size,
+                            entry_price: fill.price,
+                            leverage: Decimal::ONE,
+                            margin_used: fill.notional_usd,
+                            liquidation_price: None,
+                        };
+                        portfolio
+                            .lock()
+                            .expect("portfolio mutex poisoned")
+                            .open(position);
+                    }
                 }
-            } else {
-                warn!(asset = %asset, "mid price non-positive, skipping fill simulation");
+                Decision::Close { asset } => {
+                    let closed = portfolio
+                        .lock()
+                        .expect("portfolio mutex poisoned")
+                        .close(asset);
+                    match closed {
+                        Some(pos) => {
+                            let order = Order {
+                                venue: pos.venue,
+                                asset: pos.asset.clone(),
+                                side: pos.side.flip(),
+                                size: pos.size,
+                                limit_price: None,
+                                reduce_only: true,
+                                client_id: Uuid::new_v4(),
+                            };
+                            let fill =
+                                simulate_fill(&order, snapshot.mid_price, FillIntent::Close);
+                            info!(
+                                asset = %fill.asset,
+                                side = ?fill.side,
+                                size = %fill.size,
+                                price = %fill.price,
+                                notional_usd = %fill.notional_usd,
+                                intent = "close",
+                                "simulated fill"
+                            );
+                            if let Err(e) = perps_executor::append(&fills_path, &fill) {
+                                warn!(error = %e, "failed to persist fill");
+                            }
+                        }
+                        None => warn!(
+                            asset = %asset,
+                            "strategy emitted Close but portfolio had no position"
+                        ),
+                    }
+                }
+                Decision::Hold { .. } => {}
             }
-        }
 
-        let record = DecisionRecord::new(signal.apy, decision);
-        if let Err(e) = decisions::append(&decisions_path, &record) {
-            warn!(error = %e, "failed to persist decision");
+            let record = DecisionRecord::new(signal.apy, decision);
+            if let Err(e) = decisions::append(&decisions_path, &record) {
+                warn!(error = %e, "failed to persist decision");
+            }
         }
     };
 
