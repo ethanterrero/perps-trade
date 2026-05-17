@@ -18,6 +18,7 @@ use crate::decisions::{DecisionRecord, DECISIONS_LOG_FILE};
 
 mod decisions;
 mod digest;
+mod flatten;
 mod pnl;
 mod stats;
 
@@ -36,6 +37,9 @@ enum Command {
     Stats(StatsArgs),
     /// Print a paper-trade PnL digest: realized + unrealized + funding per asset.
     Digest(DigestArgs),
+    /// Close every open position by appending a Close fill at the current mid.
+    /// Stop the live daemon first to avoid racing on fills.jsonl.
+    Flatten(FlattenArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -59,6 +63,16 @@ struct DigestArgs {
     state_dir: PathBuf,
 }
 
+#[derive(Parser, Debug)]
+struct FlattenArgs {
+    /// Path to config directory (used for the venue URL).
+    #[arg(long, default_value = "config")]
+    config_dir: String,
+    /// Directory containing fills.jsonl.
+    #[arg(long, default_value = "state")]
+    state_dir: PathBuf,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -69,6 +83,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Run(args) => run(args).await,
         Command::Stats(args) => stats::run(&args.state_dir),
         Command::Digest(args) => digest::run(&args.state_dir),
+        Command::Flatten(args) => flatten::run(&args.config_dir, &args.state_dir).await,
     }
 }
 
