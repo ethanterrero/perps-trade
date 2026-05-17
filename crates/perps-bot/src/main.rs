@@ -5,6 +5,7 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use perps_executor::{simulate_fill, FillIntent, FILLS_LOG_FILE};
 use perps_funding::FUNDING_LOG_FILE;
+use perps_risk::{liquidation_buffer_pct, DEFAULT_MAINTENANCE_MARGIN_RATIO};
 use perps_strategy::{decide, Decision, FundingSignal, Thresholds};
 use perps_types::{MarketSnapshot, Order, Position};
 use perps_venues::hyperliquid::HyperliquidClient;
@@ -104,6 +105,7 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
         max_apy_to_exit: settings.strategy.max_funding_apy_to_exit,
     };
     let max_notional = settings.risk.max_position_usd;
+    let min_liq_buffer = settings.risk.liq_buffer_pct;
     // Replay fills.jsonl so a launchd respawn picks up where the previous run
     // left off rather than seeing an empty portfolio and re-opening everything.
     let restored = pnl::restore_portfolio(&state_dir)?;
@@ -144,42 +146,71 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
                         warn!(asset = %asset, "mid price non-positive, skipping fill");
                     } else {
                         let size = notional_usd / snapshot.mid_price;
-                        let order = Order {
+                        let prospective = Position {
                             venue: fr.venue,
                             asset: asset.clone(),
                             side: *side,
                             size,
-                            limit_price: None,
-                            reduce_only: false,
-                            client_id: Uuid::new_v4(),
-                        };
-                        let fill = simulate_fill(&order, snapshot.mid_price, FillIntent::Open);
-                        info!(
-                            asset = %fill.asset,
-                            side = ?fill.side,
-                            size = %fill.size,
-                            price = %fill.price,
-                            notional_usd = %fill.notional_usd,
-                            intent = "open",
-                            "simulated fill"
-                        );
-                        if let Err(e) = perps_executor::append(&fills_path, &fill) {
-                            warn!(error = %e, "failed to persist fill");
-                        }
-                        let position = Position {
-                            venue: fr.venue,
-                            asset: asset.clone(),
-                            side: *side,
-                            size: fill.size,
-                            entry_price: fill.price,
+                            entry_price: snapshot.mid_price,
                             leverage: Decimal::ONE,
-                            margin_used: fill.notional_usd,
+                            margin_used: *notional_usd,
                             liquidation_price: None,
                         };
-                        portfolio
-                            .lock()
-                            .expect("portfolio mutex poisoned")
-                            .open(position);
+                        let buffer = liquidation_buffer_pct(
+                            &prospective,
+                            snapshot.mid_price,
+                            DEFAULT_MAINTENANCE_MARGIN_RATIO,
+                        );
+                        if buffer < min_liq_buffer {
+                            // Risk gate vetoes the open. We still persist the
+                            // decision (strategy wanted it); the absence of a
+                            // matching fill in fills.jsonl is the audit trail.
+                            warn!(
+                                asset = %asset,
+                                side = ?side,
+                                buffer = %buffer,
+                                min_buffer = %min_liq_buffer,
+                                "refused open: liq buffer below threshold"
+                            );
+                        } else {
+                            let order = Order {
+                                venue: fr.venue,
+                                asset: asset.clone(),
+                                side: *side,
+                                size,
+                                limit_price: None,
+                                reduce_only: false,
+                                client_id: Uuid::new_v4(),
+                            };
+                            let fill = simulate_fill(&order, snapshot.mid_price, FillIntent::Open);
+                            info!(
+                                asset = %fill.asset,
+                                side = ?fill.side,
+                                size = %fill.size,
+                                price = %fill.price,
+                                notional_usd = %fill.notional_usd,
+                                liq_buffer = %buffer,
+                                intent = "open",
+                                "simulated fill"
+                            );
+                            if let Err(e) = perps_executor::append(&fills_path, &fill) {
+                                warn!(error = %e, "failed to persist fill");
+                            }
+                            let position = Position {
+                                venue: fr.venue,
+                                asset: asset.clone(),
+                                side: *side,
+                                size: fill.size,
+                                entry_price: fill.price,
+                                leverage: Decimal::ONE,
+                                margin_used: fill.notional_usd,
+                                liquidation_price: None,
+                            };
+                            portfolio
+                                .lock()
+                                .expect("portfolio mutex poisoned")
+                                .open(position);
+                        }
                     }
                 }
                 Decision::Close { asset } => {
