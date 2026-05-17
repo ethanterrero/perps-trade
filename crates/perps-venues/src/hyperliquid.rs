@@ -1,21 +1,29 @@
 use crate::VenueClient;
 use async_trait::async_trait;
 use chrono::Utc;
-use perps_types::{FundingRate, MarketSnapshot, Order, Position, Venue, VenueError};
+use hyperliquid_rust_sdk::{
+    BaseUrl, ExchangeClient, ExchangeResponseStatus, MarketCloseParams, MarketOrderParams,
+};
+use perps_types::{FundingRate, MarketSnapshot, Order, Position, Side, Venue, VenueError};
 use reqwest::Client;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::json;
 use std::str::FromStr;
 
-/// Hyperliquid REST client. Read-only for now — no signing wired.
-/// Phase 1 only exercises public endpoints (meta, assetCtxs).
+/// Hyperliquid client. Public endpoints (reads) use our hand-rolled reqwest
+/// path; private endpoints (signed writes) delegate to `hyperliquid_rust_sdk`.
+/// The signer (`sdk`) is `None` until `with_signer()` is called; without it
+/// `place_order` / `cancel_order` return `VenueError::Auth`.
 pub struct HyperliquidClient {
     http: Client,
     api_url: String,
+    sdk: Option<ExchangeClient>,
 }
 
 impl HyperliquidClient {
+    /// Read-only client. Cannot place orders.
     pub fn new(api_url: impl Into<String>) -> Self {
         let http = Client::builder()
             .timeout(std::time::Duration::from_secs(15))
@@ -24,7 +32,43 @@ impl HyperliquidClient {
         Self {
             http,
             api_url: api_url.into(),
+            sdk: None,
         }
+    }
+
+    /// Client with a signing wallet loaded. The SDK handles EIP-712 signing
+    /// and routes signed orders to `/exchange`. `secret_key` is an 0x-prefixed
+    /// hex private key — never log it.
+    pub async fn with_signer(
+        api_url: impl Into<String>,
+        secret_key: &str,
+        testnet: bool,
+    ) -> Result<Self, VenueError> {
+        use ethers::signers::LocalWallet;
+
+        let wallet: LocalWallet = secret_key
+            .parse()
+            .map_err(|e: ethers::signers::WalletError| {
+                VenueError::Auth(format!("parse secret key: {e}"))
+            })?;
+        let base_url = if testnet {
+            BaseUrl::Testnet
+        } else {
+            BaseUrl::Mainnet
+        };
+        let sdk = ExchangeClient::new(None, wallet, Some(base_url), None, None)
+            .await
+            .map_err(|e| VenueError::Auth(format!("sdk init: {e}")))?;
+
+        let http = Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .expect("reqwest client build");
+        Ok(Self {
+            http,
+            api_url: api_url.into(),
+            sdk: Some(sdk),
+        })
     }
 
     async fn post_info<T: for<'de> Deserialize<'de>>(
@@ -132,14 +176,62 @@ impl VenueClient for HyperliquidClient {
         Err(VenueError::Other("not implemented".into()))
     }
 
-    async fn place_order(&self, _order: Order) -> Result<String, VenueError> {
-        // TODO(phase-2): EIP-712 sign + POST /exchange.
-        Err(VenueError::Other("not implemented".into()))
+    async fn place_order(&self, order: Order) -> Result<String, VenueError> {
+        let sdk = self.sdk.as_ref().ok_or_else(|| {
+            VenueError::Auth("no signing wallet configured — call with_signer()".into())
+        })?;
+
+        let sz = order
+            .size
+            .to_f64()
+            .ok_or_else(|| VenueError::Other(format!("size {} not f64-representable", order.size)))?;
+
+        let response = if order.reduce_only {
+            sdk.market_close(MarketCloseParams {
+                asset: &order.asset,
+                sz: Some(sz),
+                px: None,
+                slippage: None,
+                cloid: Some(order.client_id),
+                wallet: None,
+            })
+            .await
+        } else {
+            let is_buy = matches!(order.side, Side::Long);
+            sdk.market_open(MarketOrderParams {
+                asset: &order.asset,
+                is_buy,
+                sz,
+                px: None,
+                slippage: None,
+                cloid: Some(order.client_id),
+                wallet: None,
+            })
+            .await
+        }
+        .map_err(|e| VenueError::Other(format!("sdk order: {e}")))?;
+
+        match response {
+            ExchangeResponseStatus::Ok(_) => Ok(order.client_id.to_string()),
+            ExchangeResponseStatus::Err(msg) => Err(VenueError::Rejected(msg)),
+        }
     }
 
-    async fn cancel_order(&self, _asset: &str, _order_id: &str) -> Result<(), VenueError> {
-        // TODO(phase-2).
-        Err(VenueError::Other("not implemented".into()))
+    async fn cancel_order(&self, asset: &str, order_id: &str) -> Result<(), VenueError> {
+        let _sdk = self.sdk.as_ref().ok_or_else(|| {
+            VenueError::Auth("no signing wallet configured — call with_signer()".into())
+        })?;
+        // The SDK's `cancel_by_cloid` wants a Uuid (our client_id). The bot's
+        // current order tracking passes the cloid back as a string; parse it.
+        let _cloid = uuid::Uuid::parse_str(order_id)
+            .map_err(|e| VenueError::Other(format!("bad cloid {order_id:?}: {e}")))?;
+        // Wiring `cancel_by_cloid` requires the asset's `oid` resolved via
+        // info endpoint — not needed until we track resting orders. Phase 2/3
+        // strategy only uses IOC market orders, which don't rest.
+        let _ = asset;
+        Err(VenueError::Other(
+            "cancel_order: resting-order tracking not wired yet (Phase 3+)".into(),
+        ))
     }
 }
 
