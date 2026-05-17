@@ -16,6 +16,8 @@ use uuid::Uuid;
 use crate::decisions::{DecisionRecord, DECISIONS_LOG_FILE};
 
 mod decisions;
+mod digest;
+mod pnl;
 mod stats;
 
 #[derive(Parser, Debug)]
@@ -31,6 +33,8 @@ enum Command {
     Run(RunArgs),
     /// Summarize observations recorded in state/funding.jsonl.
     Stats(StatsArgs),
+    /// Print a paper-trade PnL digest: realized + unrealized + funding per asset.
+    Digest(DigestArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -47,6 +51,13 @@ struct StatsArgs {
     state_dir: PathBuf,
 }
 
+#[derive(Parser, Debug)]
+struct DigestArgs {
+    /// Directory containing the funding / decisions / fills JSONL logs.
+    #[arg(long, default_value = "state")]
+    state_dir: PathBuf,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -56,6 +67,7 @@ async fn main() -> anyhow::Result<()> {
     })) {
         Command::Run(args) => run(args).await,
         Command::Stats(args) => stats::run(&args.state_dir),
+        Command::Digest(args) => digest::run(&args.state_dir),
     }
 }
 

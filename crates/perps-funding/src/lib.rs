@@ -24,6 +24,7 @@ struct Observation<'a> {
     #[serde(flatten)]
     funding: &'a FundingRate,
     annualized: Decimal,
+    mid_price: Decimal,
 }
 
 /// Run the poll loop until ctrl-c. One tick fires immediately, then every `interval`.
@@ -94,7 +95,11 @@ async fn poll_once<F>(
                     mid_price = %snapshot.mid_price,
                     "funding observed"
                 );
-                let obs = Observation { funding: fr, annualized };
+                let obs = Observation {
+                    funding: fr,
+                    annualized,
+                    mid_price: snapshot.mid_price,
+                };
                 if let Err(e) = append_jsonl(out_path, &obs).await {
                     error!(error = %e, asset = %asset, "failed to write observation");
                 }
@@ -128,7 +133,7 @@ mod tests {
     use rust_decimal_macros::dec;
 
     #[test]
-    fn observation_serializes_with_annualized() {
+    fn observation_serializes_with_annualized_and_mid() {
         let fr = FundingRate {
             venue: Venue::Hyperliquid,
             asset: "BTC".into(),
@@ -139,7 +144,11 @@ mod tests {
                 .unwrap(),
         };
         let annualized = fr.annualized();
-        let obs = Observation { funding: &fr, annualized };
+        let obs = Observation {
+            funding: &fr,
+            annualized,
+            mid_price: dec!(60000),
+        };
         let v: serde_json::Value = serde_json::to_value(&obs).unwrap();
         assert_eq!(v["asset"], "BTC");
         assert_eq!(v["venue"], "hyperliquid");
@@ -147,6 +156,7 @@ mod tests {
         // rust_decimal `serde-with-str` => string form.
         assert_eq!(v["rate"], "0.0001");
         assert_eq!(v["annualized"], "0.8760");
+        assert_eq!(v["mid_price"], "60000");
         assert_eq!(v["observed_at"], "2026-05-14T00:00:00Z");
     }
 }
