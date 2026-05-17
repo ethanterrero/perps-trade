@@ -3,6 +3,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
+use perps_executor::{Fill, FillIntent, FILLS_LOG_FILE};
 use perps_funding::FUNDING_LOG_FILE;
 use perps_types::FundingRate;
 use rust_decimal::Decimal;
@@ -20,6 +21,7 @@ struct AssetStats {
 pub fn run(state_dir: &Path) -> anyhow::Result<()> {
     print_funding(state_dir)?;
     print_decisions(state_dir)?;
+    print_fills(state_dir)?;
     Ok(())
 }
 
@@ -207,6 +209,103 @@ fn print_decisions(state_dir: &Path) -> anyhow::Result<()> {
             s.hold,
             format_age(now - s.last_seen),
             s.last_kind,
+        );
+    }
+
+    Ok(())
+}
+
+/// Per-asset summary derived from `fills.jsonl`.
+struct FillSummary {
+    total: usize,
+    opens: usize,
+    closes: usize,
+    last_intent: FillIntent,
+    last_seen: DateTime<Utc>,
+}
+
+fn print_fills(state_dir: &Path) -> anyhow::Result<()> {
+    let log_path = state_dir.join(FILLS_LOG_FILE);
+    if !log_path.exists() {
+        return Ok(());
+    }
+
+    let file = std::fs::File::open(&log_path)?;
+    let reader = BufReader::new(file);
+
+    let mut by_asset: BTreeMap<String, FillSummary> = BTreeMap::new();
+    let mut total = 0usize;
+    let mut malformed = 0usize;
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let fill: Fill = match serde_json::from_str(&line) {
+            Ok(f) => f,
+            Err(_) => {
+                malformed += 1;
+                continue;
+            }
+        };
+        total += 1;
+        by_asset
+            .entry(fill.asset.clone())
+            .and_modify(|s| {
+                s.total += 1;
+                match fill.intent {
+                    FillIntent::Open => s.opens += 1,
+                    FillIntent::Close => s.closes += 1,
+                }
+                if fill.filled_at >= s.last_seen {
+                    s.last_intent = fill.intent;
+                    s.last_seen = fill.filled_at;
+                }
+            })
+            .or_insert_with(|| FillSummary {
+                total: 1,
+                opens: (fill.intent == FillIntent::Open) as usize,
+                closes: (fill.intent == FillIntent::Close) as usize,
+                last_intent: fill.intent,
+                last_seen: fill.filled_at,
+            });
+    }
+
+    if by_asset.is_empty() {
+        return Ok(());
+    }
+
+    println!();
+    println!("fills from {}", log_path.display());
+    println!(
+        "total: {total} fills across {} asset(s){}",
+        by_asset.len(),
+        if malformed > 0 {
+            format!(" ({malformed} malformed lines skipped)")
+        } else {
+            String::new()
+        }
+    );
+    println!();
+    println!(
+        "{:<6} {:>7} {:>6} {:>6} {:>14} {:>12}",
+        "asset", "total", "opens", "closes", "last_seen", "last_intent"
+    );
+    let now = Utc::now();
+    for (asset, s) in &by_asset {
+        let intent_name = match s.last_intent {
+            FillIntent::Open => "open",
+            FillIntent::Close => "close",
+        };
+        println!(
+            "{:<6} {:>7} {:>6} {:>6} {:>14} {:>12}",
+            asset,
+            s.total,
+            s.opens,
+            s.closes,
+            format_age(now - s.last_seen),
+            intent_name,
         );
     }
 

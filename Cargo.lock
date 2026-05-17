@@ -1241,6 +1241,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -1260,10 +1261,17 @@ name = "perps-executor"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "perps-types",
  "perps-venues",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -44,6 +44,16 @@ impl FundingRate {
     }
 }
 
+/// One-stop venue snapshot: funding rate + mid price for an asset at a moment in
+/// time. Returned by `VenueClient::market_snapshot` so callers don't have to
+/// pay for two HTTP round-trips when the venue's response already contains both.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketSnapshot {
+    pub funding: FundingRate,
+    /// Mid-market price (midpoint between best bid and ask) in USD per base unit.
+    pub mid_price: Decimal,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Position {
     pub venue: Venue,

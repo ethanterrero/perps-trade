@@ -1,7 +1,9 @@
 //! Funding-rate polling and signal generation.
 //!
-//! Phase 1: poll `VenueClient::funding_rate` for each configured asset on a fixed cadence,
-//! log observations, and persist to JSONL for later analysis.
+//! Phase 1+: poll `VenueClient::market_snapshot` for each configured asset on a
+//! fixed cadence, log the funding piece, persist it to JSONL for later analysis,
+//! and hand the full snapshot (funding + mid price) to the caller's callback so
+//! downstream layers (strategy, executor) can react.
 
 /// File name (within `state_dir`) for the append-only funding-rate log.
 pub const FUNDING_LOG_FILE: &str = "funding.jsonl";
@@ -10,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use perps_types::FundingRate;
+use perps_types::{FundingRate, MarketSnapshot};
 use perps_venues::VenueClient;
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -27,19 +29,21 @@ struct Observation<'a> {
 /// Run the poll loop until ctrl-c. One tick fires immediately, then every `interval`.
 /// Per-asset errors are logged and skipped; the loop only exits on signal.
 ///
-/// `on_observation` is invoked synchronously after each successful fetch is
+/// `on_snapshot` is invoked synchronously after each successful fetch is
 /// persisted. It's the seam where higher layers (strategy, executor) react to
-/// observations without `perps-funding` having to depend on them. Pass a no-op
-/// closure if you only care about persistence.
+/// snapshots without `perps-funding` having to depend on them. Pass a no-op
+/// closure if you only care about persistence. The full `MarketSnapshot` is
+/// passed (not just the funding piece) so the caller has the mid price for
+/// fill simulation without a second venue round-trip.
 pub async fn poll_loop<F>(
     client: Arc<dyn VenueClient>,
     assets: Vec<String>,
     interval: Duration,
     out_path: PathBuf,
-    on_observation: F,
+    on_snapshot: F,
 ) -> anyhow::Result<()>
 where
-    F: Fn(&FundingRate) + Send + Sync + 'static,
+    F: Fn(&MarketSnapshot) + Send + Sync + 'static,
 {
     if let Some(parent) = out_path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -59,7 +63,7 @@ where
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                poll_once(client.as_ref(), &assets, &out_path, &on_observation).await;
+                poll_once(client.as_ref(), &assets, &out_path, &on_snapshot).await;
             }
             _ = tokio::signal::ctrl_c() => {
                 info!("ctrl-c received, exiting poll loop");
@@ -73,29 +77,31 @@ async fn poll_once<F>(
     client: &dyn VenueClient,
     assets: &[String],
     out_path: &Path,
-    on_observation: &F,
+    on_snapshot: &F,
 ) where
-    F: Fn(&FundingRate),
+    F: Fn(&MarketSnapshot),
 {
     for asset in assets {
-        match client.funding_rate(asset).await {
-            Ok(fr) => {
+        match client.market_snapshot(asset).await {
+            Ok(snapshot) => {
+                let fr = &snapshot.funding;
                 let annualized = fr.annualized();
                 info!(
                     asset = %fr.asset,
                     rate = %fr.rate,
                     interval_hours = fr.interval_hours,
                     annualized = %annualized,
+                    mid_price = %snapshot.mid_price,
                     "funding observed"
                 );
-                let obs = Observation { funding: &fr, annualized };
+                let obs = Observation { funding: fr, annualized };
                 if let Err(e) = append_jsonl(out_path, &obs).await {
                     error!(error = %e, asset = %asset, "failed to write observation");
                 }
-                on_observation(&fr);
+                on_snapshot(&snapshot);
             }
             Err(e) => {
-                warn!(error = %e, asset = %asset, "funding fetch failed");
+                warn!(error = %e, asset = %asset, "market snapshot fetch failed");
             }
         }
     }

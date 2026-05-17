@@ -3,12 +3,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use perps_executor::{simulate_fill, FillIntent, FILLS_LOG_FILE};
 use perps_funding::FUNDING_LOG_FILE;
 use perps_strategy::{decide, Decision, FundingSignal, PortfolioState, Thresholds};
-use perps_types::FundingRate;
+use perps_types::{MarketSnapshot, Order};
 use perps_venues::hyperliquid::HyperliquidClient;
 use perps_venues::VenueClient;
+use rust_decimal::Decimal;
 use tracing::{info, warn};
+use uuid::Uuid;
 
 use crate::decisions::{DecisionRecord, DECISIONS_LOG_FILE};
 
@@ -81,6 +84,7 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
     let state_dir = PathBuf::from(&settings.telemetry.state_dir);
     let funding_path = state_dir.join(FUNDING_LOG_FILE);
     let decisions_path = state_dir.join(DECISIONS_LOG_FILE);
+    let fills_path = state_dir.join(FILLS_LOG_FILE);
     let interval = Duration::from_secs(settings.strategy.decision_interval_seconds);
 
     let thresholds = Thresholds {
@@ -89,10 +93,11 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
     };
     let max_notional = settings.risk.max_position_usd;
     // Phase 2 dry-run: no live positions yet, so the strategy sees an empty portfolio.
-    // Once the executor lands we'll thread real positions in here.
+    // Mutable state across ticks lands in a follow-up PR (portfolio tracker).
     let portfolio = PortfolioState::default();
 
-    let on_observation = move |fr: &FundingRate| {
+    let on_snapshot = move |snapshot: &MarketSnapshot| {
+        let fr = &snapshot.funding;
         let signal = FundingSignal {
             venue: fr.venue,
             asset: fr.asset.clone(),
@@ -100,6 +105,45 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
         };
         let decision = decide(&portfolio, &signal, &thresholds, max_notional);
         log_decision(&signal, &decision);
+
+        // Simulate a fill when the decision says Open. The portfolio tracker (next
+        // PR) is what makes Close act on a real position; today we'd close nothing
+        // since the portfolio is always empty, so we skip Close in dry-run.
+        if let Decision::Open {
+            asset,
+            side,
+            notional_usd,
+        } = &decision
+        {
+            if snapshot.mid_price > Decimal::ZERO {
+                let size = notional_usd / snapshot.mid_price;
+                let order = Order {
+                    venue: fr.venue,
+                    asset: asset.clone(),
+                    side: *side,
+                    size,
+                    limit_price: None,
+                    reduce_only: false,
+                    client_id: Uuid::new_v4(),
+                };
+                let fill = simulate_fill(&order, snapshot.mid_price, FillIntent::Open);
+                info!(
+                    asset = %fill.asset,
+                    side = ?fill.side,
+                    size = %fill.size,
+                    price = %fill.price,
+                    notional_usd = %fill.notional_usd,
+                    intent = "open",
+                    "simulated fill"
+                );
+                if let Err(e) = perps_executor::append(&fills_path, &fill) {
+                    warn!(error = %e, "failed to persist fill");
+                }
+            } else {
+                warn!(asset = %asset, "mid price non-positive, skipping fill simulation");
+            }
+        }
+
         let record = DecisionRecord::new(signal.apy, decision);
         if let Err(e) = decisions::append(&decisions_path, &record) {
             warn!(error = %e, "failed to persist decision");
@@ -111,7 +155,7 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
         settings.strategy.assets.clone(),
         interval,
         funding_path,
-        on_observation,
+        on_snapshot,
     )
     .await?;
     Ok(())
