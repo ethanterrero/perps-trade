@@ -4,6 +4,23 @@ Append-only log of decisions, surprises, and changes that aren't obvious from th
 
 ---
 
+## 2026-05-17 — Persisted portfolio across restarts
+
+`launchd` will respawn the bot if it dies. Before this change, the respawned process started with `PortfolioState::default()` — empty — so it would re-Open everything that was actually still held on the exchange. After this change, startup replays `fills.jsonl` via `pnl::restore_portfolio` and seeds the in-memory portfolio with the still-open positions before the first poll.
+
+The replay reuses `pnl::pair_fills` (already tested) — Opens contribute a Position, subsequent Closes on the same asset remove it. The latest Open wins if multiple Opens precede a Close (shouldn't happen with the portfolio tracker but the code tolerates it).
+
+Leverage is fixed at `1x` during reconstruction because Fills don't carry leverage on disk. When real leverage lands we'll need to either persist it on the Fill or read it from a separate position-state log. For Phase 2 / Phase 3 single-leverage paper-trade this is fine.
+
+Smoke-tested by seeding `/tmp/perps-restart-test/fills.jsonl` with two unmatched Opens, pointing the bot at it via `PERPS_TELEMETRY__STATE_DIR`, and confirming:
+1. Startup logs `"restored portfolio from fills.jsonl" positions=2`.
+2. The first tick's decisions are `hold` for both assets (instead of `open`).
+3. `fills.jsonl` stays at 2 lines — no spurious re-Opens.
+
+Tests: 49 (was 47). Two new in `perps-bot::pnl`: replays unmatched opens with the latest-Open-wins rule, missing-file produces empty portfolio.
+
+---
+
 ## 2026-05-17 — `perps-risk` module + digest "open positions" section
 
 Closes the last open Phase 2 item from the roadmap: `perps-risk` computes notional, simulated margin usage, and would-be liquidation prices. Phase 2 ships compute-only — enforcement (refuse-open gates, kill-switch handler) is Phase 3 when we wire it to the executor's decision.
