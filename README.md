@@ -9,8 +9,8 @@ Delta-neutral funding-rate harvester for perpetual futures markets, written in R
 Trading code is dangerous. This bot:
 
 - Has only been exercised against Hyperliquid testnet.
-- Has no order signing wired — it cannot submit a real order even if you point the config at mainnet.
-- Has no liquidation enforcement gate or kill switch yet (Phase 3).
+- Ships with `dry_run = true` by default; live orders require **both** `dry_run = false` in config AND `--allow-live` on the `run` command. Either gate missing refuses to start.
+- Refuse-open and `flatten` kill-switch are wired; per-tick risk monitoring with alerting is still TODO.
 - Is not production-tested.
 
 Don't point this at mainnet expecting it to work safely, and don't load real keys into it.

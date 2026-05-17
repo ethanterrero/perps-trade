@@ -4,6 +4,36 @@ Append-only log of decisions, surprises, and changes that aren't obvious from th
 
 ---
 
+## 2026-05-17 — EIP-712 signing wired (gated behind dry_run + --allow-live)
+
+Phase 4 #1: order signing is now wired in `HyperliquidClient` via [`hyperliquid_rust_sdk`](https://github.com/hyperliquid-dex/hyperliquid-rust-sdk). The bot doesn't *use* it yet — the poll-loop callback is sync, calling async `place_order` from inside it requires the async-callback refactor that lands in PR #14 alongside the keychain integration. So this PR is the **capability**, not the **integration**.
+
+**Two-key door for live trading.** Either gate missing refuses to start:
+- `venue.hyperliquid.dry_run = false` in config (defaults to `true` if unset — so existing TOML files without the field continue to dry-run)
+- `--allow-live` flag on `perps-bot run`
+
+Both required. Misreading either one alone produces a refusal at startup, before any wallet is loaded.
+
+**SDK choice.** Used the official `hyperliquid_rust_sdk` rather than rolling our own EIP-712 signer. Tradeoff: ~50 transitive deps (ethers, k256, rmp, ...) and a 1-minute cold compile. Win: the signing logic is the vendor's problem to keep correct. Signature bugs in this code would lose actual money, so deferring to maintained code is the right call.
+
+**Decimal → f64 conversion at the API boundary.** Hyperliquid's SDK takes `f64` for size and price; our domain types use `Decimal` (no float-precision drift in math). Converting via `Decimal::to_f64()` at the call site. Errors if the Decimal isn't representable, which shouldn't happen for any reasonable size/price.
+
+**Banner discipline.** DRY-RUN mode prints an info-level banner. LIVE mode prints a warn-level banner with the venue URL. The banners are loud enough to catch in a tail-f.
+
+**`place_order` only supports market IOC for now.** Maps `reduce_only` to the SDK's `market_close` and otherwise uses `market_open`. Resting orders + `cancel_order` are stubbed until we need them (Phase 5+ for cross-venue arb where resting bids might matter).
+
+Tests: 50 across the workspace (was 49). One new in `perps-config` confirming `dry_run` defaults to `true` when absent from the TOML — guards against a future change accidentally flipping the default to `false`.
+
+Safety-gate smoke (4 scenarios):
+- dry_run unset → DRY-RUN banner, starts. ✓
+- dry_run=false, no flag → "LIVE TRADING refused" → exit 1. ✓
+- dry_run=false, flag, no key → "dry_run=false requires venue.hyperliquid.secret_key" → exit 1. ✓
+- dry_run=false, flag, garbage key → LIVE banner shown, then "auth error: parse secret key: odd number of digits" → exit 1. ✓
+
+README updated: the "no signing wired" line is now stale; replaced with the two-key-door description.
+
+---
+
 ## 2026-05-17 — Kill switch: `perps-bot flatten`
 
 Phase 3 #3. A new subcommand reads `fills.jsonl`, finds still-open positions via `pnl::pair_fills`, fetches a fresh mid for each from the venue, and appends a `FillIntent::Close` fill — bringing the bot's portfolio to flat from outside the running daemon.

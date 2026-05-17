@@ -20,6 +20,25 @@ pub struct HyperliquidSettings {
     pub api_url: String,
     pub ws_url: String,
     pub testnet: bool,
+    /// When `true`, never place real orders — the bot simulates fills locally.
+    /// Defaults to `true` if unset so an in-place upgrade can't accidentally
+    /// start live trading. Set to `false` AND pass `--allow-live` to the
+    /// `run` command to enable real orders.
+    #[serde(default = "default_dry_run")]
+    pub dry_run: bool,
+    /// Hex private key (0x-prefixed, no quotes) used for EIP-712 order signing.
+    /// Required when `dry_run = false`. Never commit a real key — use an env
+    /// override or the macOS keychain loader (PR #14).
+    #[serde(default)]
+    pub secret_key: Option<String>,
+    /// 0x address of the trading account. Optional today; required once
+    /// `clearinghouseState` queries are wired (reconciliation).
+    #[serde(default)]
+    pub account_address: Option<String>,
+}
+
+fn default_dry_run() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -80,4 +99,44 @@ pub fn load(config_dir: impl AsRef<Path>) -> Result<Settings, ConfigError> {
     );
 
     Ok(builder.build()?.try_deserialize()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dry_run_defaults_to_true_when_absent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("default.toml"),
+            r#"
+[venue.hyperliquid]
+api_url = "https://api.hyperliquid-testnet.xyz"
+ws_url = "wss://api.hyperliquid-testnet.xyz/ws"
+testnet = true
+
+[risk]
+max_position_usd = 1000
+liq_buffer_pct = 0.30
+max_leverage = 3
+
+[strategy]
+assets = ["BTC"]
+min_funding_apy_to_enter = 0.10
+max_funding_apy_to_exit = 0.02
+decision_interval_seconds = 300
+
+[telemetry]
+log_level = "info"
+state_dir = "state"
+"#,
+        )
+        .unwrap();
+        let s = load(dir.path()).unwrap();
+        // dry_run absent in toml -> default true. Existing deployments don't
+        // get surprised by an unset field flipping to live.
+        assert!(s.venue.hyperliquid.dry_run);
+        assert!(s.venue.hyperliquid.secret_key.is_none());
+    }
 }

@@ -47,6 +47,11 @@ struct RunArgs {
     /// Path to config directory.
     #[arg(long, default_value = "config")]
     config_dir: String,
+    /// Required acknowledgement when running with `venue.hyperliquid.dry_run = false`.
+    /// Belt-and-suspenders: even a misconfigured TOML can't enable live trading
+    /// without an explicit flag on the command line.
+    #[arg(long, default_value_t = false)]
+    allow_live: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -79,6 +84,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command.unwrap_or(Command::Run(RunArgs {
         config_dir: "config".into(),
+        allow_live: false,
     })) {
         Command::Run(args) => run(args).await,
         Command::Stats(args) => stats::run(&args.state_dir),
@@ -107,8 +113,51 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
         "perps-bot starting funding poller"
     );
 
-    let client: Arc<dyn VenueClient> =
-        Arc::new(HyperliquidClient::new(&settings.venue.hyperliquid.api_url));
+    // Dry-run vs live: belt-and-suspenders gating. Both config (`dry_run = false`)
+    // AND the `--allow-live` CLI flag must be present to enable signed orders.
+    // Either alone refuses to proceed, so a misread config or a forgotten flag
+    // can't surprise us into live trading.
+    let dry_run = settings.venue.hyperliquid.dry_run;
+    let client: Arc<dyn VenueClient> = match (dry_run, args.allow_live) {
+        (true, _) => {
+            info!("============================================================");
+            info!("DRY-RUN mode — fills simulated, no orders sent to the venue");
+            info!("============================================================");
+            Arc::new(HyperliquidClient::new(&settings.venue.hyperliquid.api_url))
+        }
+        (false, false) => {
+            anyhow::bail!(
+                "LIVE TRADING refused: venue.hyperliquid.dry_run=false but --allow-live is not set. \
+                 Pass --allow-live on the run command to confirm you intend real orders."
+            );
+        }
+        (false, true) => {
+            let secret_key = settings
+                .venue
+                .hyperliquid
+                .secret_key
+                .as_deref()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "dry_run=false requires venue.hyperliquid.secret_key (or set it via the \
+                         PERPS_VENUE__HYPERLIQUID__SECRET_KEY env var). Never commit a real key."
+                    )
+                })?;
+            tracing::warn!("============================================================");
+            tracing::warn!("LIVE TRADING ENABLED — REAL ORDERS WILL BE PLACED ON {}",
+                settings.venue.hyperliquid.api_url);
+            tracing::warn!("============================================================");
+            Arc::new(
+                HyperliquidClient::with_signer(
+                    &settings.venue.hyperliquid.api_url,
+                    secret_key,
+                    settings.venue.hyperliquid.testnet,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("live client init: {e}"))?,
+            )
+        }
+    };
     let state_dir = PathBuf::from(&settings.telemetry.state_dir);
     let funding_path = state_dir.join(FUNDING_LOG_FILE);
     let decisions_path = state_dir.join(DECISIONS_LOG_FILE);
