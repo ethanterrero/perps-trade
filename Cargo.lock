@@ -1296,6 +1296,7 @@ version = "0.1.0"
 dependencies = [
  "perps-types",
  "rust_decimal",
+ "rust_decimal_macros",
  "tracing",
 ]
 
