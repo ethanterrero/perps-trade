@@ -8,8 +8,11 @@ use perps_strategy::{decide, Decision, FundingSignal, PortfolioState, Thresholds
 use perps_types::FundingRate;
 use perps_venues::hyperliquid::HyperliquidClient;
 use perps_venues::VenueClient;
-use tracing::info;
+use tracing::{info, warn};
 
+use crate::decisions::{DecisionRecord, DECISIONS_LOG_FILE};
+
+mod decisions;
 mod stats;
 
 #[derive(Parser, Debug)]
@@ -75,7 +78,9 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
 
     let client: Arc<dyn VenueClient> =
         Arc::new(HyperliquidClient::new(&settings.venue.hyperliquid.api_url));
-    let out_path = PathBuf::from(&settings.telemetry.state_dir).join(FUNDING_LOG_FILE);
+    let state_dir = PathBuf::from(&settings.telemetry.state_dir);
+    let funding_path = state_dir.join(FUNDING_LOG_FILE);
+    let decisions_path = state_dir.join(DECISIONS_LOG_FILE);
     let interval = Duration::from_secs(settings.strategy.decision_interval_seconds);
 
     let thresholds = Thresholds {
@@ -95,13 +100,17 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
         };
         let decision = decide(&portfolio, &signal, &thresholds, max_notional);
         log_decision(&signal, &decision);
+        let record = DecisionRecord::new(signal.apy, decision);
+        if let Err(e) = decisions::append(&decisions_path, &record) {
+            warn!(error = %e, "failed to persist decision");
+        }
     };
 
     perps_funding::poll_loop(
         client,
         settings.strategy.assets.clone(),
         interval,
-        out_path,
+        funding_path,
         on_observation,
     )
     .await?;
@@ -128,8 +137,8 @@ fn log_decision(signal: &FundingSignal, decision: &Decision) {
             kind = "close",
             "dry-run decision"
         ),
-        Decision::Hold => info!(
-            asset = %signal.asset,
+        Decision::Hold { asset } => info!(
+            asset = %asset,
             apy = %signal.apy,
             kind = "hold",
             "dry-run decision"
