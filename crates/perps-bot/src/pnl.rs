@@ -22,7 +22,8 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use perps_executor::{Fill, FillIntent, FILLS_LOG_FILE};
 use perps_funding::FUNDING_LOG_FILE;
-use perps_types::Side;
+use perps_strategy::PortfolioState;
+use perps_types::{Position, Side};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
@@ -80,6 +81,34 @@ impl OpenTrade {
             Side::Short => (entry - current_mid) * size,
         }
     }
+}
+
+/// Reconstruct the bot's portfolio state by replaying `fills.jsonl`. Each
+/// Open contributes a Position; each subsequent Close on the same asset
+/// removes it. Returns the resulting `PortfolioState` (empty if the file is
+/// missing or has no still-open positions). Used at startup so a launchd
+/// respawn doesn't forget existing positions.
+///
+/// `leverage` is fixed at 1x since fills don't carry it explicitly — Phase 2
+/// only opens at 1x. Once we add real leverage we'll need to store it on the
+/// Fill so it can be recovered here.
+pub fn restore_portfolio(state_dir: &Path) -> anyhow::Result<PortfolioState> {
+    let fills = read_fills(state_dir)?;
+    let (_closed, open_trades) = pair_fills(&fills);
+    let mut portfolio = PortfolioState::default();
+    for trade in open_trades {
+        portfolio.open(Position {
+            venue: trade.open.venue,
+            asset: trade.asset.clone(),
+            side: trade.side,
+            size: trade.open.size,
+            entry_price: trade.open.price,
+            leverage: Decimal::ONE,
+            margin_used: trade.open.notional_usd,
+            liquidation_price: None,
+        });
+    }
+    Ok(portfolio)
 }
 
 pub fn read_fills(state_dir: &Path) -> anyhow::Result<Vec<Fill>> {
@@ -382,6 +411,57 @@ mod tests {
         let to = Utc.timestamp_opt(3600, 0).unwrap();
         let pnl = accrued_funding("BTC", Side::Short, dec!(1000), from, to, &observations);
         assert_eq!(pnl, Decimal::ZERO);
+    }
+
+    #[test]
+    fn restore_portfolio_replays_unmatched_opens() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join(FILLS_LOG_FILE);
+
+        // BTC opened, never closed -> survives.
+        // ETH opened then closed -> not in restored portfolio.
+        // SOL opened, closed, opened again -> survives as Short at the second open.
+        let fills = vec![
+            fill("BTC", FillIntent::Open, Side::Short, dec!(60000), dec!(0.01), 0),
+            fill("ETH", FillIntent::Open, Side::Long, dec!(3000), dec!(1), 5),
+            fill("ETH", FillIntent::Close, Side::Short, dec!(3050), dec!(1), 10),
+            fill("SOL", FillIntent::Open, Side::Short, dec!(120), dec!(10), 15),
+            fill("SOL", FillIntent::Close, Side::Long, dec!(121), dec!(10), 20),
+            fill("SOL", FillIntent::Open, Side::Short, dec!(122), dec!(10), 25),
+        ];
+        let lines: Vec<String> = fills
+            .iter()
+            .map(|f| serde_json::to_string(f).unwrap())
+            .collect();
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+
+        let portfolio = restore_portfolio(tmp.path()).unwrap();
+        let asset_set: std::collections::HashSet<String> = portfolio
+            .positions
+            .iter()
+            .map(|p| p.asset.clone())
+            .collect();
+        assert!(asset_set.contains("BTC"));
+        assert!(asset_set.contains("SOL"));
+        assert!(!asset_set.contains("ETH"));
+        assert_eq!(portfolio.positions.len(), 2);
+
+        // SOL position should reflect the latest Open (entry 122, Short).
+        let sol = portfolio
+            .positions
+            .iter()
+            .find(|p| p.asset == "SOL")
+            .unwrap();
+        assert_eq!(sol.entry_price, dec!(122));
+        assert_eq!(sol.side, Side::Short);
+        assert_eq!(sol.leverage, Decimal::ONE);
+    }
+
+    #[test]
+    fn restore_portfolio_handles_missing_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let portfolio = restore_portfolio(tmp.path()).unwrap();
+        assert!(portfolio.positions.is_empty());
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use perps_executor::{simulate_fill, FillIntent, FILLS_LOG_FILE};
 use perps_funding::FUNDING_LOG_FILE;
-use perps_strategy::{decide, Decision, FundingSignal, PortfolioState, Thresholds};
+use perps_strategy::{decide, Decision, FundingSignal, Thresholds};
 use perps_types::{MarketSnapshot, Order, Position};
 use perps_venues::hyperliquid::HyperliquidClient;
 use perps_venues::VenueClient;
@@ -104,10 +104,20 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
         max_apy_to_exit: settings.strategy.max_funding_apy_to_exit,
     };
     let max_notional = settings.risk.max_position_usd;
+    // Replay fills.jsonl so a launchd respawn picks up where the previous run
+    // left off rather than seeing an empty portfolio and re-opening everything.
+    let restored = pnl::restore_portfolio(&state_dir)?;
+    let restored_count = restored.positions.len();
+    if restored_count > 0 {
+        info!(
+            positions = restored_count,
+            "restored portfolio from fills.jsonl"
+        );
+    }
     // PortfolioState lives in an Arc<Mutex<_>> so the poll-loop's `Fn` callback
     // (called serially from one tokio task) can read it for `decide` and mutate
     // it after a fill, without us changing the callback bound to FnMut.
-    let portfolio = Arc::new(Mutex::new(PortfolioState::default()));
+    let portfolio = Arc::new(Mutex::new(restored));
 
     let on_snapshot = {
         let portfolio = Arc::clone(&portfolio);
