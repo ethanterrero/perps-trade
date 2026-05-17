@@ -4,6 +4,34 @@ Append-only log of decisions, surprises, and changes that aren't obvious from th
 
 ---
 
+## 2026-05-17 — Executor dry-run + MarketSnapshot + fills.jsonl
+
+Phase 2 paper-trade pipeline is now end-to-end: funding observation → decide → simulate fill → persist Fill. Three JSONL streams (`funding.jsonl`, `decisions.jsonl`, `fills.jsonl`) and `perps-bot stats` shows all three.
+
+**`MarketSnapshot { funding, mid_price }` replaces `funding_rate` on `VenueClient`.** Hyperliquid's `metaAndAssetCtxs` already returns both fields in the same response, so paying for two round-trips per asset per tick (one for funding, one for mid) was wasteful. The trait now has a single `market_snapshot(asset)` method returning both; `funding.jsonl` schema is unchanged (we still write the FundingRate piece via the existing `Observation` struct).
+
+The `poll_loop` callback signature changed from `Fn(&FundingRate)` to `Fn(&MarketSnapshot)`. Sync, like before. The closure in `perps-bot::run` uses `snapshot.funding` for the decision and `snapshot.mid_price` for the fill — no extra async calls during the tick.
+
+**`perps-executor::simulate_fill(order, mid, intent) -> Fill`** is pure: no fees, no slippage, no partial fills. Fills get a `FillIntent::{Open, Close}` tag set by the caller (the bot knows whether it's opening or closing; the executor doesn't need to figure it out from existing positions). `notional_usd` is stored on the Fill explicitly rather than re-computed by readers, so Decimal-scale mismatches don't surprise anyone.
+
+**Known gap, intentional:** with no portfolio tracker yet, `PortfolioState` is always empty, so the strategy re-emits Open every tick and the bot re-fills. We end up with a `fills.jsonl` row per tick per asset even though in reality we'd only open once. Fixing this is PR #6's job (mutable PortfolioState across ticks; emit Hold/Close once a position exists).
+
+Smoke run, 4s interval, 3 cycles, 2 assets — 6 observations / 6 decisions / 6 fills, all consistent.
+
+```
+fills from state/fills.jsonl
+total: 6 fills across 2 asset(s)
+asset    total  opens closes      last_seen  last_intent
+BTC          3      3      0         0s ago         open
+ETH          3      3      0         0s ago         open
+```
+
+Real testnet prices: BTC $78,091.50, ETH $2,185.10. So a $1,000 notional Short BTC produces a fill of size 0.01280549 BTC. The Decimal-divide leaves trailing digits — cosmetic but technically correct.
+
+Tests: 21 across the workspace (was 15). Four new in `perps-executor` (limit vs. market fill price, intent passthrough, JSONL roundtrip) plus two in `perps-venues` (mid price parsing happy/null).
+
+---
+
 ## 2026-05-17 — Persist decisions to JSONL + stats decisions section
 
 `decisions.jsonl` is the new sibling to `funding.jsonl`. Every tick that emits a decision now produces a line like:
