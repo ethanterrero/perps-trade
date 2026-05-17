@@ -4,6 +4,21 @@ Append-only log of decisions, surprises, and changes that aren't obvious from th
 
 ---
 
+## 2026-05-17 — Kill switch: `perps-bot flatten`
+
+Phase 3 #3. A new subcommand reads `fills.jsonl`, finds still-open positions via `pnl::pair_fills`, fetches a fresh mid for each from the venue, and appends a `FillIntent::Close` fill — bringing the bot's portfolio to flat from outside the running daemon.
+
+**Out-of-process by design.** The running daemon and `flatten` would race on `fills.jsonl` if both wrote at once, so the help text and module doc explicitly tell the operator to stop the daemon first (`launchctl unload`). The simpler signal-based approach (SIGUSR1 → in-process flatten-and-exit) is also reasonable but not needed for Phase 3 — `flatten` after `launchctl unload` is the obvious recovery flow.
+
+Verified end-to-end:
+- Empty state → "nothing to flatten — no open positions"
+- Two pre-existing Opens → fetched live testnet mids (BTC $78,161.5, ETH $2,190.15), appended two `Close` fills with `side.flip()` and `reduce_only: true`, exit code 0.
+- Running `perps-bot digest` afterward shows `open positions: 0` and computes per-asset realized PnL from the open→close price diff. The synthetic ETH "entry $2,000 → close $2,190" came out to a $95 paper loss; useful confirmation the close path is the symmetric pair of the open path.
+
+Per-asset errors don't abort the whole flatten — they're collected and reported at the end. Exits non-zero if any failed so cron/scripts can tell.
+
+---
+
 ## 2026-05-17 — Refuse-open gate wired to executor
 
 Phase 3 #1: before persisting an Open fill, the bot computes the would-be liquidation buffer for the prospective position and skips the open if it's below `risk.liq_buffer_pct` (default 0.30 = 30%). The decision still goes to `decisions.jsonl` (strategy intent is preserved); the absence of a matching fill in `fills.jsonl` is the audit trail of the refusal.
