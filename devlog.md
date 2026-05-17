@@ -4,6 +4,20 @@ Append-only log of decisions, surprises, and changes that aren't obvious from th
 
 ---
 
+## 2026-05-16 — Phase 2 stub: perps-strategy::decide
+
+Pure-logic stub for the delta-neutral entry/exit rule. `decide(state, signal, thresholds, max_notional) -> Decision` where `Decision` is `Open { asset, side, notional_usd } | Close { asset } | Hold`. No I/O, no async, no wiring into the bot yet — that's the next chunk once the observe loop has banked a couple of days of data.
+
+Sign convention follows Hyperliquid funding: positive APY ⇒ longs pay shorts ⇒ collect by shorting; negative APY ⇒ shorts pay longs ⇒ collect by going long. Symmetric thresholds: `|apy| >= min_apy_to_enter` opens, `|apy| < max_apy_to_exit` closes. The dead zone between the two is deliberate so we don't churn when funding wobbles near a threshold.
+
+**Decision: don't take `&StrategySettings` directly.** The roadmap sketched `decide(... cfg: &StrategySettings)` but importing `perps-config` into `perps-strategy` pulls in the loader (config crate, dotenvy, …) which the pure-logic crate doesn't need. Defined a local `Thresholds { min_apy_to_enter, max_apy_to_exit }` instead — the caller maps from settings at the call site. Cheap to change later if it becomes annoying.
+
+`max_notional_usd` is passed in as a parameter rather than baked into `Thresholds`. It lives in `RiskSettings`, not `StrategySettings`, and conceptually sizing is the risk module's call, not the strategy's — the strategy just emits "open with at-most this notional" and risk gets final say later.
+
+Decisions serialize with a `kind` tag (`{"kind":"open","asset":"BTC",...}`) so future executor logs are self-describing. 8 unit tests cover boundary, symmetric sign, dead-zone hold, case-insensitive asset matching, and the JSON shape.
+
+---
+
 ## 2026-05-15 — Ops plist, stats subcommand, env-override fix
 
 Layered on top of the Phase 1 observe loop (entry below).
