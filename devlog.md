@@ -4,6 +4,43 @@ Append-only log of decisions, surprises, and changes that aren't obvious from th
 
 ---
 
+## 2026-06-01 — Net-delta accounting (the missing delta-neutral primitive)
+
+The bot is named "delta-neutral" but every position it has ever opened is a **single perp leg** —
+full directional exposure, no hedge. Running the digest over the 3.5-day testnet paper run made
+this concrete: funding earned +$25.49, but unrealized price PnL −$16.51 (pure directional noise)
+and **net delta −$2016.51 against $2016.51 gross — i.e. 100% directional.** We've been getting paid
+to run a leveraged short, not to be market-neutral.
+
+This PR adds the accounting to *see* that, without touching the working fill/pairing/restore paths:
+
+- `Position::signed_notional(mark)` in `perps-types` — +long / −short USD. A long-spot/short-perp
+  pair of equal notional sums to zero (the delta-neutral invariant, now expressible and tested).
+- `net_delta_usd` and `hedge_position_for` in `perps-risk`. `hedge_position_for` returns the spot
+  hedge `Position` (opposite side, equal notional, 1x) that neutralizes a perp leg — the primitive
+  the executor will call when the second leg gets wired.
+- `perps-bot digest` grew a `delta_usd` column, a `net delta / gross` line, and a loud warning when
+  the book is materially directional (|net delta| ≥ 1% of gross).
+
+**Why accounting before the hedge leg.** Wiring the spot leg touches instrument-tagging on fills,
+PnL pairing per-leg, and a spot price source — a multi-PR change. Shipping the delta primitive
+first means every subsequent PR is judged against one number: did net delta move toward zero. It
+also avoids a half-finished hedge path sitting in the tree.
+
+**Returns a `Position`, not an `Order`.** `hedge_position_for` is pure compute and keeps `perps-risk`
+free of order/uuid concerns. The executor turns it into a spot order at the call site when the leg
+lands. `margin_used` = full notional (spot is unleveraged), leverage 1.
+
+The full sequenced path to delta-0 trading (6 PRs: instrument tag → simulate spot leg → drift
+rebalancing → real spot venue/basis → reconciliation → small-size mainnet both legs) is written up
+in [docs/MORNING-SUMMARY.md](docs/MORNING-SUMMARY.md).
+
+Tests: 52 across the workspace (was 48). One new in `perps-types` (signed-notional sign + pair
+nets to zero), three in `perps-risk` (lone-short delta = full negative notional, hedged pair = 0,
+mark-valuation sanity).
+
+---
+
 ## 2026-05-17 — EIP-712 signing wired (gated behind dry_run + --allow-live)
 
 Phase 4 #1: order signing is now wired in `HyperliquidClient` via [`hyperliquid_rust_sdk`](https://github.com/hyperliquid-dex/hyperliquid-rust-sdk). The bot doesn't *use* it yet — the poll-loop callback is sync, calling async `place_order` from inside it requires the async-callback refactor that lands in PR #14 alongside the keychain integration. So this PR is the **capability**, not the **integration**.

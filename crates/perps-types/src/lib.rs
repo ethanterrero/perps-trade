@@ -71,6 +71,19 @@ impl Position {
     pub fn notional_usd(&self, mark_price: Decimal) -> Decimal {
         self.size * mark_price
     }
+
+    /// Directional exposure in USD: `+notional` for a Long, `−notional` for a
+    /// Short. This is the position's contribution to portfolio delta. A
+    /// delta-neutral pair (long spot + short perp of equal notional) sums to
+    /// zero here; a lone perp leg does not — which is the whole point of
+    /// tracking it.
+    pub fn signed_notional(&self, mark_price: Decimal) -> Decimal {
+        let notional = self.notional_usd(mark_price);
+        match self.side {
+            Side::Long => notional,
+            Side::Short => -notional,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,5 +134,28 @@ mod tests {
     fn side_flips() {
         assert_eq!(Side::Long.flip(), Side::Short);
         assert_eq!(Side::Short.flip(), Side::Long);
+    }
+
+    #[test]
+    fn signed_notional_is_positive_for_long_negative_for_short() {
+        let long = Position {
+            venue: Venue::Hyperliquid,
+            asset: "BTC".into(),
+            side: Side::Long,
+            size: dec!(0.5),
+            entry_price: dec!(60000),
+            leverage: dec!(1),
+            margin_used: dec!(30000),
+            liquidation_price: None,
+        };
+        let mut short = long.clone();
+        short.side = Side::Short;
+        assert_eq!(long.signed_notional(dec!(61000)), dec!(30500));
+        assert_eq!(short.signed_notional(dec!(61000)), dec!(-30500));
+        // A long-spot / short-perp pair of equal notional nets to zero delta.
+        assert_eq!(
+            long.signed_notional(dec!(61000)) + short.signed_notional(dec!(61000)),
+            Decimal::ZERO
+        );
     }
 }

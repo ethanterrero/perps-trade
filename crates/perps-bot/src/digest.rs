@@ -157,9 +157,10 @@ pub fn run(state_dir: &Path) -> anyhow::Result<()> {
         println!();
         println!("open positions:");
         println!(
-            "{:<6} {:<6} {:>14} {:>12} {:>12} {:>14} {:>10}",
-            "asset", "side", "size", "entry", "mark", "liq_price", "buffer"
+            "{:<6} {:<6} {:>14} {:>12} {:>12} {:>14} {:>10} {:>14}",
+            "asset", "side", "size", "entry", "mark", "liq_price", "buffer", "delta_usd"
         );
+        let mut net_delta = Decimal::ZERO;
         for trade in &open {
             let key = trade.asset.to_ascii_uppercase();
             let mark = mids.get(&key).copied().unwrap_or(trade.open.price);
@@ -175,12 +176,14 @@ pub fn run(state_dir: &Path) -> anyhow::Result<()> {
             };
             let liq = liquidation_price(&position, DEFAULT_MAINTENANCE_MARGIN_RATIO);
             let buf = liquidation_buffer_pct(&position, mark, DEFAULT_MAINTENANCE_MARGIN_RATIO);
+            let delta = position.signed_notional(mark);
+            net_delta += delta;
             let side = match trade.side {
                 perps_types::Side::Long => "long",
                 perps_types::Side::Short => "short",
             };
             println!(
-                "{:<6} {:<6} {:>14} {:>12} {:>12} {:>14} {:>10}",
+                "{:<6} {:<6} {:>14} {:>12} {:>12} {:>14} {:>10} {:>14}",
                 trade.asset,
                 side,
                 format_decimal(position.size, 6),
@@ -188,6 +191,28 @@ pub fn run(state_dir: &Path) -> anyhow::Result<()> {
                 format_decimal(mark, 2),
                 format_decimal(liq, 2),
                 format_pct(buf),
+                format_usd(delta),
+            );
+        }
+
+        // Gross long exposure for context: |net delta| / gross tells you how
+        // hedged the book is. Gross is the sum of |signed_notional|.
+        let gross: Decimal = open
+            .iter()
+            .map(|t| {
+                let key = t.asset.to_ascii_uppercase();
+                let mark = mids.get(&key).copied().unwrap_or(t.open.price);
+                (t.open.size * mark).abs()
+            })
+            .sum();
+        println!();
+        println!("net delta: {} (gross {})", format_usd(net_delta), format_usd(gross));
+        if gross > Decimal::ZERO && net_delta.abs() * Decimal::from(100) >= gross {
+            // |net delta| >= 1% of gross — the book carries material directional
+            // exposure. With no spot hedge wired, a single-leg perp book sits at
+            // 100% here. See docs/reports for the path to a real two-leg hedge.
+            println!(
+                "  ⚠ book is directional, not delta-neutral — hedge leg not yet wired (single-leg perp)"
             );
         }
     }

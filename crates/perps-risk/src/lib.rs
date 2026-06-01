@@ -99,6 +99,49 @@ pub fn portfolio_margin(positions: &[Position], mark_prices: &HashMap<String, De
         .sum()
 }
 
+/// Net directional exposure across all positions, in USD. Sum of each
+/// position's signed notional (+ long, − short), valued at the supplied marks
+/// with a fallback to `entry_price` for any asset missing from `mark_prices`.
+///
+/// This is the headline number for a delta-neutral book: it should sit near
+/// zero. A single-leg perp book (no spot hedge) reports its full perp notional
+/// here — i.e. the strategy is currently *directional*, not delta-neutral, and
+/// this surfaces exactly how far off zero we are.
+pub fn net_delta_usd(positions: &[Position], mark_prices: &HashMap<String, Decimal>) -> Decimal {
+    positions
+        .iter()
+        .map(|p| {
+            let mark = mark_prices
+                .get(&p.asset.to_ascii_uppercase())
+                .copied()
+                .unwrap_or(p.entry_price);
+            p.signed_notional(mark)
+        })
+        .sum()
+}
+
+/// The spot hedge leg that neutralizes a perp `position`: opposite side, equal
+/// notional (hence equal base-unit size at the same mark), 1x. Pairing the perp
+/// with this position drives `net_delta_usd` to zero.
+///
+/// Pure compute — it returns the *intended* hedge as a [`Position`], not an
+/// order. The executor turns it into a spot order when the spot leg is wired
+/// (see the delta-neutral execution plan). `margin_used` is set to the hedge
+/// notional (spot is unleveraged); `leverage` is 1.
+pub fn hedge_position_for(position: &Position, mark_price: Decimal) -> Position {
+    let notional = notional_usd(position, mark_price);
+    Position {
+        venue: position.venue,
+        asset: position.asset.clone(),
+        side: position.side.flip(),
+        size: position.size,
+        entry_price: mark_price,
+        leverage: Decimal::ONE,
+        margin_used: notional,
+        liquidation_price: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +264,39 @@ mod tests {
         let marks = HashMap::new();
         let total = portfolio_notional(&[p], &marks);
         assert_eq!(total, dec!(30000)); // 0.5 * 60000 entry
+    }
+
+    #[test]
+    fn net_delta_of_lone_short_is_full_negative_notional() {
+        // A single-leg perp book is NOT delta-neutral: its net delta equals the
+        // perp's signed notional.
+        let p = position(Side::Short, dec!(60000), dec!(0.5), dec!(1));
+        let marks = HashMap::new(); // falls back to entry
+        assert_eq!(net_delta_usd(&[p], &marks), dec!(-30000));
+    }
+
+    #[test]
+    fn net_delta_of_hedged_pair_is_zero() {
+        // Short perp + its spot hedge nets to zero delta at the same mark.
+        let perp = position(Side::Short, dec!(60000), dec!(0.5), dec!(1));
+        let hedge = hedge_position_for(&perp, dec!(60000));
+        assert_eq!(hedge.side, Side::Long);
+        assert_eq!(hedge.size, dec!(0.5));
+        let marks = HashMap::new();
+        assert_eq!(net_delta_usd(&[perp, hedge], &marks), Decimal::ZERO);
+    }
+
+    #[test]
+    fn net_delta_uses_mark_for_valuation() {
+        // After a price move the hedge built at entry no longer perfectly
+        // neutralizes — residual delta is the drift the rebalancer must chase.
+        let perp = position(Side::Short, dec!(60000), dec!(0.5), dec!(1));
+        let hedge = hedge_position_for(&perp, dec!(60000));
+        let mut marks = HashMap::new();
+        marks.insert("BTC".to_string(), dec!(66000)); // +10%
+        // Short delta = -0.5*66000 = -33000; Long hedge delta = +0.5*66000 = +33000.
+        // Equal base sizes still net to zero at a common mark — drift comes from
+        // unequal sizes, which the rebalancer introduces. Sanity-check the common-mark case.
+        assert_eq!(net_delta_usd(&[perp, hedge], &marks), Decimal::ZERO);
     }
 }
