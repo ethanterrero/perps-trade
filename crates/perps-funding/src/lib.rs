@@ -25,6 +25,8 @@ struct Observation<'a> {
     funding: &'a FundingRate,
     annualized: Decimal,
     mid_price: Decimal,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spot_mid_price: Option<Decimal>,
 }
 
 /// Run the poll loop until ctrl-c. One tick fires immediately, then every `interval`.
@@ -93,12 +95,14 @@ async fn poll_once<F>(
                     interval_hours = fr.interval_hours,
                     annualized = %annualized,
                     mid_price = %snapshot.mid_price,
+                    spot_mid_price = ?snapshot.spot_mid_price,
                     "funding observed"
                 );
                 let obs = Observation {
                     funding: fr,
                     annualized,
                     mid_price: snapshot.mid_price,
+                    spot_mid_price: snapshot.spot_mid_price,
                 };
                 if let Err(e) = append_jsonl(out_path, &obs).await {
                     error!(error = %e, asset = %asset, "failed to write observation");
@@ -148,8 +152,11 @@ mod tests {
             funding: &fr,
             annualized,
             mid_price: dec!(60000),
+            spot_mid_price: None,
         };
         let v: serde_json::Value = serde_json::to_value(&obs).unwrap();
+        // No spot quote → field omitted rather than written as null.
+        assert!(v.get("spot_mid_price").is_none());
         assert_eq!(v["asset"], "BTC");
         assert_eq!(v["venue"], "hyperliquid");
         assert_eq!(v["interval_hours"], 1);

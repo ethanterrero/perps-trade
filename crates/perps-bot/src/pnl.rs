@@ -1,7 +1,7 @@
 //! PnL attribution for paper-trade runs.
 //!
 //! Reads `fills.jsonl` to reconstruct closed trades (Open paired with Close on
-//! the same asset) and still-open positions (Open with no matching Close yet),
+//! the same asset and instrument) and still-open positions (Open with no matching Close yet),
 //! then reads `funding.jsonl` to integrate funding earned/paid over each
 //! position's lifetime. Realized + unrealized + funding gives a per-asset
 //! attribution suitable for end-of-day digests.
@@ -12,18 +12,19 @@
 //!     segments we use the closest available rate. This is good enough for
 //!     paper-trade ballparks; real funding is paid in discrete events per
 //!     funding period, but we don't model that yet.
-//!   - Unrealized PnL uses the latest mid price observed for that asset.
-//!   - No fees (Phase 2 dry-run is fee-free).
+//!   - Unrealized PnL uses the latest mid price observed for that asset; spot
+//!     legs use the logged spot mid when it's sane, else the perp mid.
+//!   - Fees come from each fill's `fees_usd`. Funding only accrues to perp legs.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use perps_executor::{Fill, FillIntent, FILLS_LOG_FILE};
+use perps_executor::{spot_fill_price, Fill, FillIntent, FILLS_LOG_FILE};
 use perps_funding::FUNDING_LOG_FILE;
 use perps_strategy::PortfolioState;
-use perps_types::{Position, Side};
+use perps_types::{Instrument, Position, Side};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
@@ -39,11 +40,14 @@ pub struct LoggedFunding {
     pub observed_at: DateTime<Utc>,
     #[serde(default)]
     pub mid_price: Option<Decimal>,
+    #[serde(default)]
+    pub spot_mid_price: Option<Decimal>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ClosedTrade {
     pub asset: String,
+    pub instrument: Instrument,
     /// Side of the original Open (the position's side).
     pub side: Side,
     pub open: Fill,
@@ -51,6 +55,11 @@ pub struct ClosedTrade {
 }
 
 impl ClosedTrade {
+    /// Fees paid on both fills.
+    pub fn fees_usd(&self) -> Decimal {
+        self.open.fees_usd + self.close.fees_usd
+    }
+
     /// Realized price PnL in USD. Positive = profit.
     pub fn realized_pnl(&self) -> Decimal {
         let entry = self.open.price;
@@ -66,11 +75,17 @@ impl ClosedTrade {
 #[derive(Debug, Clone)]
 pub struct OpenTrade {
     pub asset: String,
+    pub instrument: Instrument,
     pub side: Side,
     pub open: Fill,
 }
 
 impl OpenTrade {
+    /// Fees paid so far (the open fill only).
+    pub fn fees_usd(&self) -> Decimal {
+        self.open.fees_usd
+    }
+
     /// Unrealized PnL in USD against the current mid. Same sign convention as
     /// realized.
     pub fn unrealized_pnl(&self, current_mid: Decimal) -> Decimal {
@@ -85,7 +100,7 @@ impl OpenTrade {
 
 /// Reconstruct the bot's portfolio state by replaying `fills.jsonl`. Each
 /// Open contributes a Position; each subsequent Close on the same asset
-/// removes it. Returns the resulting `PortfolioState` (empty if the file is
+/// and instrument removes it. Returns the resulting `PortfolioState` (empty if the file is
 /// missing or has no still-open positions). Used at startup so a launchd
 /// respawn doesn't forget existing positions.
 ///
@@ -100,6 +115,7 @@ pub fn restore_portfolio(state_dir: &Path) -> anyhow::Result<PortfolioState> {
         portfolio.open(Position {
             venue: trade.open.venue,
             asset: trade.asset.clone(),
+            instrument: trade.instrument,
             side: trade.side,
             size: trade.open.size,
             entry_price: trade.open.price,
@@ -153,28 +169,30 @@ pub fn read_funding(state_dir: &Path) -> anyhow::Result<Vec<LoggedFunding>> {
     Ok(obs)
 }
 
-/// Pair Open fills with their corresponding Close fills per asset. Returns
+/// Pair Open fills with their corresponding Close fills per asset and
+/// instrument (a hedged position's perp and spot legs pair separately). Returns
 /// `(closed_trades, still_open)`. Assumes:
 ///   - Fills are time-ordered (caller sorts).
-///   - Each Open is closed by the next Close on the same asset. Multiple Opens
+///   - Each Open is closed by the next Close on the same leg. Multiple Opens
 ///     on the same asset before a Close shouldn't happen given the portfolio
 ///     tracker, but if they do, only the latest Open is paired (older Opens
 ///     are dropped silently).
 ///   - A Close with no preceding Open is dropped silently.
 pub fn pair_fills(fills: &[Fill]) -> (Vec<ClosedTrade>, Vec<OpenTrade>) {
-    let mut current_open: HashMap<String, Fill> = HashMap::new();
+    let mut current_open: HashMap<(String, Instrument), Fill> = HashMap::new();
     let mut closed = Vec::new();
 
     for fill in fills {
-        let asset = fill.asset.to_ascii_uppercase();
+        let key = (fill.asset.to_ascii_uppercase(), fill.instrument);
         match fill.intent {
             FillIntent::Open => {
-                current_open.insert(asset, fill.clone());
+                current_open.insert(key, fill.clone());
             }
             FillIntent::Close => {
-                if let Some(open) = current_open.remove(&asset) {
+                if let Some(open) = current_open.remove(&key) {
                     closed.push(ClosedTrade {
                         asset: open.asset.clone(),
+                        instrument: open.instrument,
                         side: open.side,
                         open,
                         close: fill.clone(),
@@ -188,6 +206,7 @@ pub fn pair_fills(fills: &[Fill]) -> (Vec<ClosedTrade>, Vec<OpenTrade>) {
         .into_values()
         .map(|fill| OpenTrade {
             asset: fill.asset.clone(),
+            instrument: fill.instrument,
             side: fill.side,
             open: fill,
         })
@@ -273,11 +292,20 @@ fn apply_rate(
     }
 }
 
-/// Latest observed mid price per asset (case-folded uppercase key).
-pub fn latest_mids(observations: &[LoggedFunding]) -> HashMap<String, Decimal> {
+/// Latest observed mark per asset (case-folded uppercase key) for one leg.
+/// Spot marks use the logged spot mid only when it's within the executor's
+/// sanity gap of the perp mid — the same rule the spot fill used — otherwise
+/// the perp mid.
+pub fn latest_mids(observations: &[LoggedFunding], instrument: Instrument) -> HashMap<String, Decimal> {
     let mut latest: HashMap<String, (DateTime<Utc>, Decimal)> = HashMap::new();
     for o in observations {
-        if let Some(mid) = o.mid_price {
+        let mark = match instrument {
+            Instrument::Perp => o.mid_price,
+            Instrument::Spot => o
+                .mid_price
+                .map(|perp| spot_fill_price(perp, o.spot_mid_price).unwrap_or(perp)),
+        };
+        if let Some(mid) = mark {
             let key = o.asset.to_ascii_uppercase();
             latest
                 .entry(key)
@@ -305,6 +333,7 @@ mod tests {
         Fill {
             venue: Venue::Hyperliquid,
             asset: asset.into(),
+            instrument: Instrument::Perp,
             side,
             size,
             price,
@@ -323,6 +352,7 @@ mod tests {
             interval_hours: 1,
             observed_at: Utc.timestamp_opt(secs, 0).unwrap(),
             mid_price: Some(dec!(100)),
+            spot_mid_price: None,
         }
     }
 
@@ -457,6 +487,69 @@ mod tests {
         assert_eq!(sol.leverage, Decimal::ONE);
     }
 
+    fn spot(mut f: Fill) -> Fill {
+        f.instrument = Instrument::Spot;
+        f
+    }
+
+    #[test]
+    fn hedged_legs_pair_separately() {
+        // Open both legs, close both legs: two closed trades, nothing open,
+        // and the price PnL nets out.
+        let fills = vec![
+            fill("BTC", FillIntent::Open, Side::Short, dec!(100), dec!(1), 0),
+            spot(fill("BTC", FillIntent::Open, Side::Long, dec!(100), dec!(1), 0)),
+            fill("BTC", FillIntent::Close, Side::Long, dec!(110), dec!(1), 10),
+            spot(fill("BTC", FillIntent::Close, Side::Short, dec!(110), dec!(1), 10)),
+        ];
+        let (closed, open) = pair_fills(&fills);
+        assert_eq!(closed.len(), 2);
+        assert!(open.is_empty());
+        let net: Decimal = closed.iter().map(|t| t.realized_pnl()).sum();
+        assert_eq!(net, Decimal::ZERO);
+    }
+
+    #[test]
+    fn restore_portfolio_keeps_both_legs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fills = [
+            fill("BTC", FillIntent::Open, Side::Short, dec!(100), dec!(1), 0),
+            spot(fill("BTC", FillIntent::Open, Side::Long, dec!(100), dec!(1), 0)),
+        ];
+        let lines: Vec<String> = fills.iter().map(|f| serde_json::to_string(f).unwrap()).collect();
+        std::fs::write(tmp.path().join(FILLS_LOG_FILE), lines.join("\n") + "\n").unwrap();
+
+        let portfolio = restore_portfolio(tmp.path()).unwrap();
+        assert_eq!(portfolio.positions.len(), 2);
+        let spot_leg = portfolio
+            .positions
+            .iter()
+            .find(|p| p.instrument == Instrument::Spot)
+            .unwrap();
+        assert_eq!(spot_leg.side, Side::Long);
+    }
+
+    #[test]
+    fn fees_sum_across_open_and_close() {
+        let mut open = fill("BTC", FillIntent::Open, Side::Short, dec!(100), dec!(1), 0);
+        open.fees_usd = dec!(0.045);
+        let mut close = fill("BTC", FillIntent::Close, Side::Long, dec!(100), dec!(1), 10);
+        close.fees_usd = dec!(0.045);
+        let (closed, _) = pair_fills(&[open, close]);
+        assert_eq!(closed[0].fees_usd(), dec!(0.09));
+    }
+
+    #[test]
+    fn spot_mark_uses_sane_spot_mid_else_perp_mid() {
+        let mut good = obs("BTC", dec!(0.0001), 0);
+        good.spot_mid_price = Some(dec!(100.5));
+        let mut broken = obs("ETH", dec!(0.0001), 0);
+        broken.spot_mid_price = Some(dec!(3)); // testnet-style junk quote
+        let mids = latest_mids(&[good, broken], Instrument::Spot);
+        assert_eq!(mids.get("BTC"), Some(&dec!(100.5)));
+        assert_eq!(mids.get("ETH"), Some(&dec!(100)));
+    }
+
     #[test]
     fn restore_portfolio_handles_missing_file() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -473,6 +566,7 @@ mod tests {
                 interval_hours: 1,
                 observed_at: Utc.timestamp_opt(0, 0).unwrap(),
                 mid_price: Some(dec!(60000)),
+                spot_mid_price: None,
             },
             LoggedFunding {
                 asset: "BTC".into(),
@@ -480,6 +574,7 @@ mod tests {
                 interval_hours: 1,
                 observed_at: Utc.timestamp_opt(100, 0).unwrap(),
                 mid_price: Some(dec!(60500)),
+                spot_mid_price: None,
             },
             LoggedFunding {
                 asset: "ETH".into(),
@@ -487,9 +582,10 @@ mod tests {
                 interval_hours: 1,
                 observed_at: Utc.timestamp_opt(50, 0).unwrap(),
                 mid_price: Some(dec!(3000)),
+                spot_mid_price: None,
             },
         ];
-        let mids = latest_mids(&obs);
+        let mids = latest_mids(&obs, Instrument::Perp);
         assert_eq!(mids.get("BTC"), Some(&dec!(60500)));
         assert_eq!(mids.get("ETH"), Some(&dec!(3000)));
     }

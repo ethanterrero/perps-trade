@@ -102,7 +102,7 @@ pub fn portfolio_margin(positions: &[Position], mark_prices: &HashMap<String, De
 #[cfg(test)]
 mod tests {
     use super::*;
-    use perps_types::Venue;
+    use perps_types::{Instrument, Venue};
     use rust_decimal_macros::dec;
 
     fn position(side: Side, entry: Decimal, size: Decimal, leverage: Decimal) -> Position {
@@ -111,6 +111,7 @@ mod tests {
         Position {
             venue: Venue::Hyperliquid,
             asset: "BTC".into(),
+            instrument: Instrument::Perp,
             side,
             size,
             entry_price: entry,

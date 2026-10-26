@@ -2766,8 +2766,11 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 name = "perps-backtest"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "perps-strategy",
  "perps-types",
  "rust_decimal",
+ "rust_decimal_macros",
  "serde",
  "serde_json",
  "tracing",
@@ -2805,6 +2808,7 @@ version = "0.1.0"
 dependencies = [
  "config",
  "dotenvy",
+ "perps-types",
  "rust_decimal",
  "serde",
  "tempfile",
@@ -2860,6 +2864,7 @@ dependencies = [
 name = "perps-strategy"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "perps-types",
  "rust_decimal",
  "rust_decimal_macros",
@@ -2876,6 +2881,7 @@ dependencies = [
  "rust_decimal",
  "rust_decimal_macros",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "uuid 1.23.1",
 ]
@@ -2895,6 +2901,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "url",
  "uuid 1.23.1",

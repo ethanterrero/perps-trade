@@ -4,6 +4,33 @@ Append-only log of decisions, surprises, and changes that aren't obvious from th
 
 ---
 
+## 2026-10-26 — Hedge leg, 7-day funding signal, fee-aware backtest
+
+A review against a year of Hyperliquid **mainnet** funding found the Phase 2 bot wasn't delta-neutral and couldn't be profitable as written:
+
+- **Single leg.** `decide` returned one `Side` and the executor sent one perp order, so every "position" was a naked short (or long) perp. Last year's paper profit would have been price moves, not funding.
+- **Churn.** Thresholds on the raw hourly print re-entered 200+ times a year per asset. With fees modelled, that's −47% to −83% a year; fees ran 4–10× the funding collected.
+- **Free fills.** `simulate_fill` charged nothing, which hid the churn.
+
+What changed:
+
+- **Hedge leg.** An Open is now two legs of equal base size: short perp + long spot (`Instrument::{Perp, Spot}` on `Position` / `Order` / `Fill`, `#[serde(default)] = Perp` so old logs still parse). `venue.hyperliquid.spot_tokens` maps perp → spot token (`BTC = "UBTC"`, `ETH = "UETH"`); unmapped assets are refused. Spot mids come from `spotMetaAndAssetCtxs`, matched by `coin` (`@142`) — the ctx list is **not** index-aligned with the pair list.
+- **Carry only runs one way.** Negative funding would need short spot, which the venue doesn't offer, so the strategy never opens on negative funding (the old unhedged-long branch is gone) and exits when the smoothed signal drops below the exit threshold, including going negative. The old `|apy|` exit held a short perp through strongly negative funding.
+- **Signal.** `FundingWindow` keeps one value per hour (latest wins) over `signal_window_hours` (168) and returns a mean once `min_signal_hours` (168) are present. At startup the bot seeds each window from `fundingHistory`, so it acts on its first tick; if that fetch fails it waits for live polls to fill the window. `decisions.jsonl` now records `raw_apy` next to the smoothed `signal_apy`.
+- **Fees.** `[fees]` config (Hyperliquid base tier: perp 0.045%, spot 0.07% taker), charged by `simulate_fill`, shown in `digest`.
+- **Backtest.** `perps-backtest` replays history through the same `FundingWindow` + `decide`, charging fees + slippage per leg per entry/exit and an exit cost if still open at the end. `perps-bot backtest` runs it against mainnet, with `--enter` / `--exit` lists for a threshold grid and `raw hourly` / `always on` baselines.
+- **Rate limits.** Pulling a year for several assets back to back hits Hyperliquid's public 429. `funding_history` retries with exponential backoff (1s → 16s, 5 tries) on a new `VenueError::RateLimited`.
+
+**Testnet spot is junk.** Testnet has no UBTC and its UETH/USDC mid was 83 against a ~2,300 perp. `spot_fill_price` accepts a spot mid only within 2% of the perp mid; otherwise the dry-run spot leg fills at the perp mid with a warning. Live `place_order` **refuses** spot orders outright — the SDK calls address perps by name, so a spot order sent through them would trade the perp.
+
+**Thresholds are still 10% / 2%.** The grid (README → Backtest) shows 10/2 is the weakest smoothed setting: it sits flat 40–70% of the year. 8% / −5% did best across BTC/ETH/SOL/HYPE (4.7 / 4.5 / 1.7 / 9.2%), close to always-on for majors and well ahead of it for SOL. That's one in-sample year, so the default wasn't changed here.
+
+Not modelled: perp/spot basis at entry/exit, spot leg capital vs perp margin (returns are on notional per leg), maker fills.
+
+Tests: 75 across the workspace (was 48).
+
+---
+
 ## 2026-05-17 — EIP-712 signing wired (gated behind dry_run + --allow-live)
 
 Phase 4 #1: order signing is now wired in `HyperliquidClient` via [`hyperliquid_rust_sdk`](https://github.com/hyperliquid-dex/hyperliquid-rust-sdk). The bot doesn't *use* it yet — the poll-loop callback is sync, calling async `place_order` from inside it requires the async-callback refactor that lands in PR #14 alongside the keychain integration. So this PR is the **capability**, not the **integration**.

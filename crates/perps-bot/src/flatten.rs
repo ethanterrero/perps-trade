@@ -1,6 +1,6 @@
 //! `perps-bot flatten` — emergency kill-switch. Reads `fills.jsonl`, finds
-//! still-open positions, fetches a fresh mid for each, and appends a Close
-//! fill to bring the bot's portfolio to flat.
+//! still-open legs (perp and spot), fetches a fresh mid for each, and appends
+//! a Close fill per leg to bring the bot's portfolio to flat.
 //!
 //! **Run with the live daemon stopped.** If both the daemon and `flatten` are
 //! writing to `fills.jsonl` simultaneously the resulting state is racy and
@@ -10,8 +10,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use perps_executor::{simulate_fill, FillIntent, FILLS_LOG_FILE};
-use perps_types::Order;
+use perps_executor::{simulate_fill, spot_fill_price, FillIntent, FILLS_LOG_FILE};
+use perps_types::{Instrument, Order};
 use perps_venues::hyperliquid::HyperliquidClient;
 use perps_venues::VenueClient;
 use tracing::{info, warn};
@@ -33,18 +33,20 @@ pub async fn run(config_dir: &str, state_dir: &Path) -> anyhow::Result<()> {
     let (_closed, open_trades) = pnl::pair_fills(&fills);
 
     if open_trades.is_empty() {
-        println!("nothing to flatten — no open positions in {}", state_dir.display());
+        println!("nothing to flatten — no open legs in {}", state_dir.display());
         return Ok(());
     }
 
     println!(
-        "flattening {} open position(s) via {}",
+        "flattening {} open leg(s) via {}",
         open_trades.len(),
         settings.venue.hyperliquid.api_url
     );
 
-    let client: Arc<dyn VenueClient> =
-        Arc::new(HyperliquidClient::new(&settings.venue.hyperliquid.api_url));
+    let client: Arc<dyn VenueClient> = Arc::new(
+        HyperliquidClient::new(&settings.venue.hyperliquid.api_url)
+            .with_spot_tokens(&settings.venue.hyperliquid.spot_tokens),
+    );
     let fills_path = state_dir.join(FILLS_LOG_FILE);
 
     let mut closed_ok = 0;
@@ -53,7 +55,14 @@ pub async fn run(config_dir: &str, state_dir: &Path) -> anyhow::Result<()> {
     for trade in &open_trades {
         let asset = &trade.asset;
         let mid = match client.market_snapshot(asset).await {
-            Ok(snap) => snap.mid_price,
+            Ok(snap) => match trade.instrument {
+                Instrument::Perp => snap.mid_price,
+                Instrument::Spot => spot_fill_price(snap.mid_price, snap.spot_mid_price)
+                    .unwrap_or_else(|| {
+                        warn!(asset = %asset, "flatten: no sane spot mid, closing spot leg at perp mid");
+                        snap.mid_price
+                    }),
+            },
             Err(e) => {
                 warn!(asset = %asset, error = %e, "could not fetch mid for flatten");
                 errored.push((asset.clone(), format!("{e}")));
@@ -63,15 +72,18 @@ pub async fn run(config_dir: &str, state_dir: &Path) -> anyhow::Result<()> {
         let order = Order {
             venue: trade.open.venue,
             asset: asset.clone(),
+            instrument: trade.instrument,
             side: trade.side.flip(),
             size: trade.open.size,
             limit_price: None,
             reduce_only: true,
             client_id: Uuid::new_v4(),
         };
-        let fill = simulate_fill(&order, mid, FillIntent::Close);
+        let fee_rate = settings.fees.taker_rate(trade.instrument);
+        let fill = simulate_fill(&order, mid, FillIntent::Close, fee_rate);
         info!(
             asset = %fill.asset,
+            instrument = ?fill.instrument,
             side = ?fill.side,
             size = %fill.size,
             price = %fill.price,
@@ -89,7 +101,7 @@ pub async fn run(config_dir: &str, state_dir: &Path) -> anyhow::Result<()> {
     }
 
     println!(
-        "flatten complete: closed {} of {} position(s)",
+        "flatten complete: closed {} of {} leg(s)",
         closed_ok,
         open_trades.len()
     );
@@ -98,7 +110,7 @@ pub async fn run(config_dir: &str, state_dir: &Path) -> anyhow::Result<()> {
         for (asset, err) in &errored {
             println!("  {asset}: {err}");
         }
-        anyhow::bail!("{} of {} positions failed to flatten", errored.len(), open_trades.len());
+        anyhow::bail!("{} of {} legs failed to flatten", errored.len(), open_trades.len());
     }
 
     Ok(())
