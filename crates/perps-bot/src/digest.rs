@@ -7,7 +7,7 @@ use std::path::Path;
 use chrono::Utc;
 use perps_executor::FILLS_LOG_FILE;
 use perps_risk::{liquidation_buffer_pct, liquidation_price, DEFAULT_MAINTENANCE_MARGIN_RATIO};
-use perps_types::Position;
+use perps_types::{Instrument, Position};
 use rust_decimal::Decimal;
 
 use crate::pnl;
@@ -19,6 +19,28 @@ struct AssetPnl {
     realized: Decimal,
     unrealized: Decimal,
     funding: Decimal,
+    fees: Decimal,
+}
+
+impl AssetPnl {
+    fn total(&self) -> Decimal {
+        self.realized + self.unrealized + self.funding - self.fees
+    }
+}
+
+/// Only the perp leg pays or receives funding.
+fn leg_funding(instrument: Instrument, funding: impl FnOnce() -> Decimal) -> Decimal {
+    match instrument {
+        Instrument::Perp => funding(),
+        Instrument::Spot => Decimal::ZERO,
+    }
+}
+
+fn leg_name(instrument: Instrument) -> &'static str {
+    match instrument {
+        Instrument::Perp => "perp",
+        Instrument::Spot => "spot",
+    }
 }
 
 pub fn run(state_dir: &Path) -> anyhow::Result<()> {
@@ -34,7 +56,12 @@ pub fn run(state_dir: &Path) -> anyhow::Result<()> {
     }
 
     let (closed, open) = pnl::pair_fills(&fills);
-    let mids = pnl::latest_mids(&observations);
+    let perp_mids = pnl::latest_mids(&observations, Instrument::Perp);
+    let spot_mids = pnl::latest_mids(&observations, Instrument::Spot);
+    let mark_for = |instrument: Instrument, key: &str| match instrument {
+        Instrument::Perp => perp_mids.get(key).copied(),
+        Instrument::Spot => spot_mids.get(key).copied(),
+    };
 
     let mut rows: BTreeMap<String, AssetPnl> = BTreeMap::new();
     let now = Utc::now();
@@ -48,38 +75,49 @@ pub fn run(state_dir: &Path) -> anyhow::Result<()> {
         .unwrap_or(now);
 
     for trade in &closed {
-        let funding = pnl::accrued_funding(
-            &trade.asset,
-            trade.side,
-            trade.open.notional_usd,
-            trade.open.filled_at,
-            trade.close.filled_at,
-            &observations,
-        );
+        let funding = leg_funding(trade.instrument, || {
+            pnl::accrued_funding(
+                &trade.asset,
+                trade.side,
+                trade.open.notional_usd,
+                trade.open.filled_at,
+                trade.close.filled_at,
+                &observations,
+            )
+        });
         let row = rows
             .entry(trade.asset.to_ascii_uppercase())
             .or_default();
-        row.closed_count += 1;
+        // Count positions, not legs: a hedged trade closes two legs at once.
+        if trade.instrument == Instrument::Perp {
+            row.closed_count += 1;
+        }
         row.realized += trade.realized_pnl();
         row.funding += funding;
+        row.fees += trade.fees_usd();
     }
 
     for trade in &open {
         let key = trade.asset.to_ascii_uppercase();
-        let mid = mids.get(&key).copied().unwrap_or(trade.open.price);
+        let mid = mark_for(trade.instrument, &key).unwrap_or(trade.open.price);
         let unrealized = trade.unrealized_pnl(mid);
-        let funding = pnl::accrued_funding(
-            &trade.asset,
-            trade.side,
-            trade.open.notional_usd,
-            trade.open.filled_at,
-            last_observed,
-            &observations,
-        );
+        let funding = leg_funding(trade.instrument, || {
+            pnl::accrued_funding(
+                &trade.asset,
+                trade.side,
+                trade.open.notional_usd,
+                trade.open.filled_at,
+                last_observed,
+                &observations,
+            )
+        });
         let row = rows.entry(key).or_default();
-        row.open_count += 1;
+        if trade.instrument == Instrument::Perp {
+            row.open_count += 1;
+        }
         row.unrealized += unrealized;
         row.funding += funding;
+        row.fees += trade.fees_usd();
     }
 
     // Period spans both fills and observations so a "held the whole run" digest
@@ -111,7 +149,7 @@ pub fn run(state_dir: &Path) -> anyhow::Result<()> {
         format_duration(duration),
     );
     println!(
-        "fills: {}  observations: {}  open positions: {}  closed trades: {}",
+        "fills: {}  observations: {}  open legs: {}  closed legs: {}",
         fills.len(),
         observations.len(),
         open.len(),
@@ -119,53 +157,55 @@ pub fn run(state_dir: &Path) -> anyhow::Result<()> {
     );
     println!();
     println!(
-        "{:<6} {:>7} {:>5} {:>12} {:>12} {:>12} {:>12}",
-        "asset", "trades", "open", "realized", "unrealized", "funding", "total"
+        "{:<6} {:>7} {:>5} {:>12} {:>12} {:>12} {:>12} {:>12}",
+        "asset", "trades", "open", "realized", "unrealized", "funding", "fees", "total"
     );
 
     let mut totals = AssetPnl::default();
     for (asset, row) in &rows {
-        let total = row.realized + row.unrealized + row.funding;
         totals.realized += row.realized;
         totals.unrealized += row.unrealized;
         totals.funding += row.funding;
+        totals.fees += row.fees;
         totals.closed_count += row.closed_count;
         totals.open_count += row.open_count;
         println!(
-            "{:<6} {:>7} {:>5} {:>12} {:>12} {:>12} {:>12}",
+            "{:<6} {:>7} {:>5} {:>12} {:>12} {:>12} {:>12} {:>12}",
             asset,
             row.closed_count,
             row.open_count,
             format_usd(row.realized),
             format_usd(row.unrealized),
             format_usd(row.funding),
-            format_usd(total),
+            format_usd(row.fees),
+            format_usd(row.total()),
         );
     }
 
-    let grand_total = totals.realized + totals.unrealized + totals.funding;
     println!();
     println!(
-        "totals: realized {}  unrealized {}  funding {}  net {}",
+        "totals: realized {}  unrealized {}  funding {}  fees {}  net {}",
         format_usd(totals.realized),
         format_usd(totals.unrealized),
         format_usd(totals.funding),
-        format_usd(grand_total),
+        format_usd(totals.fees),
+        format_usd(totals.total()),
     );
 
     if !open.is_empty() {
         println!();
-        println!("open positions:");
+        println!("open legs:");
         println!(
-            "{:<6} {:<6} {:>14} {:>12} {:>12} {:>14} {:>10}",
-            "asset", "side", "size", "entry", "mark", "liq_price", "buffer"
+            "{:<6} {:<5} {:<6} {:>14} {:>12} {:>12} {:>14} {:>10}",
+            "asset", "leg", "side", "size", "entry", "mark", "liq_price", "buffer"
         );
         for trade in &open {
             let key = trade.asset.to_ascii_uppercase();
-            let mark = mids.get(&key).copied().unwrap_or(trade.open.price);
+            let mark = mark_for(trade.instrument, &key).unwrap_or(trade.open.price);
             let position = Position {
                 venue: trade.open.venue,
                 asset: trade.asset.clone(),
+                instrument: trade.instrument,
                 side: trade.side,
                 size: trade.open.size,
                 entry_price: trade.open.price,
@@ -173,21 +213,32 @@ pub fn run(state_dir: &Path) -> anyhow::Result<()> {
                 margin_used: trade.open.notional_usd,
                 liquidation_price: None,
             };
-            let liq = liquidation_price(&position, DEFAULT_MAINTENANCE_MARGIN_RATIO);
-            let buf = liquidation_buffer_pct(&position, mark, DEFAULT_MAINTENANCE_MARGIN_RATIO);
+            // Spot is fully paid for and can't be liquidated.
+            let (liq, buf) = match trade.instrument {
+                Instrument::Perp => (
+                    format_decimal(liquidation_price(&position, DEFAULT_MAINTENANCE_MARGIN_RATIO), 2),
+                    format_pct(liquidation_buffer_pct(
+                        &position,
+                        mark,
+                        DEFAULT_MAINTENANCE_MARGIN_RATIO,
+                    )),
+                ),
+                Instrument::Spot => ("-".to_string(), "-".to_string()),
+            };
             let side = match trade.side {
                 perps_types::Side::Long => "long",
                 perps_types::Side::Short => "short",
             };
             println!(
-                "{:<6} {:<6} {:>14} {:>12} {:>12} {:>14} {:>10}",
+                "{:<6} {:<5} {:<6} {:>14} {:>12} {:>12} {:>14} {:>10}",
                 trade.asset,
+                leg_name(trade.instrument),
                 side,
                 format_decimal(position.size, 6),
                 format_decimal(position.entry_price, 2),
                 format_decimal(mark, 2),
-                format_decimal(liq, 2),
-                format_pct(buf),
+                liq,
+                buf,
             );
         }
     }

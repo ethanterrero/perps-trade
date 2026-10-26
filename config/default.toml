@@ -6,6 +6,14 @@ api_url = "https://api.hyperliquid-testnet.xyz"
 ws_url = "wss://api.hyperliquid-testnet.xyz/ws"
 testnet = true
 
+# Spot token (quoted in USDC) bought to hedge each perp short. An asset with
+# no entry here is never opened. Testnet spot books are mostly empty, so in
+# dry-run the spot leg falls back to the perp mid when the spot quote is
+# missing or more than 2% away.
+[venue.hyperliquid.spot_tokens]
+BTC = "UBTC"
+ETH = "UETH"
+
 [risk]
 # Hard cap on per-asset notional in USD. Bot refuses to size larger.
 max_position_usd = 1000
@@ -18,12 +26,23 @@ max_leverage = 3
 [strategy]
 # Assets to monitor for funding opportunities.
 assets = ["BTC", "ETH"]
-# Annualized funding rate threshold for entering a delta-neutral position.
+# Both thresholds apply to the trailing mean below, not the latest hourly print.
+# Annualized funding rate threshold for entering a hedged carry position.
 min_funding_apy_to_enter = 0.10
 # Annualized funding threshold below which we exit (avoid death-by-1000-cuts).
 max_funding_apy_to_exit = 0.02
+# Trailing window for the funding signal (168h = 7 days). Seeded from venue
+# funding history at startup.
+signal_window_hours = 168
+# Hours of history required before the signal is trusted.
+min_signal_hours = 168
 # How often to re-evaluate entry/exit decisions.
 decision_interval_seconds = 300
+
+# Taker fees as a fraction of notional. Hyperliquid base tier.
+[fees]
+perp_taker = 0.00045
+spot_taker = 0.0007
 
 [telemetry]
 log_level = "info"

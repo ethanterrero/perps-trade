@@ -1,5 +1,7 @@
+use perps_types::FeeSchedule;
 use rust_decimal::Decimal;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -8,6 +10,9 @@ pub struct Settings {
     pub risk: RiskSettings,
     pub strategy: StrategySettings,
     pub telemetry: TelemetrySettings,
+    /// Taker fees charged on simulated fills. Defaults to Hyperliquid's base tier.
+    #[serde(default)]
+    pub fees: FeeSchedule,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -35,6 +40,10 @@ pub struct HyperliquidSettings {
     /// `clearinghouseState` queries are wired (reconciliation).
     #[serde(default)]
     pub account_address: Option<String>,
+    /// Perp asset → spot token (quoted in USDC) for the hedge leg, e.g.
+    /// `BTC = "UBTC"`. An asset with no entry can't be opened.
+    #[serde(default)]
+    pub spot_tokens: HashMap<String, String>,
 }
 
 fn default_dry_run() -> bool {
@@ -54,6 +63,16 @@ pub struct StrategySettings {
     pub min_funding_apy_to_enter: Decimal,
     pub max_funding_apy_to_exit: Decimal,
     pub decision_interval_seconds: u64,
+    /// Trailing window the funding signal averages over, in hours.
+    #[serde(default = "default_signal_window_hours")]
+    pub signal_window_hours: u32,
+    /// Hours of funding history required before the signal is trusted.
+    #[serde(default = "default_signal_window_hours")]
+    pub min_signal_hours: u32,
+}
+
+fn default_signal_window_hours() -> u32 {
+    168
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -138,5 +157,26 @@ state_dir = "state"
         // get surprised by an unset field flipping to live.
         assert!(s.venue.hyperliquid.dry_run);
         assert!(s.venue.hyperliquid.secret_key.is_none());
+        // Fields added with the hedge leg default sensibly for older TOML.
+        assert_eq!(s.strategy.signal_window_hours, 168);
+        assert_eq!(s.strategy.min_signal_hours, 168);
+        assert!(s.venue.hyperliquid.spot_tokens.is_empty());
+        assert_eq!(s.fees.perp_taker, FeeSchedule::hyperliquid_base().perp_taker);
+    }
+
+    #[test]
+    fn repo_default_config_loads_hedge_settings() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config");
+        let s = load(&dir).unwrap();
+        let tokens: HashMap<String, String> = s
+            .venue
+            .hyperliquid
+            .spot_tokens
+            .iter()
+            .map(|(k, v)| (k.to_ascii_uppercase(), v.clone()))
+            .collect();
+        assert_eq!(tokens.get("BTC").map(String::as_str), Some("UBTC"));
+        assert_eq!(tokens.get("ETH").map(String::as_str), Some("UETH"));
+        assert!(s.fees.spot_taker > s.fees.perp_taker);
     }
 }

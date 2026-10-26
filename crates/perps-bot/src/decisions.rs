@@ -14,21 +14,27 @@ use serde::{Deserialize, Serialize};
 pub const DECISIONS_LOG_FILE: &str = "decisions.jsonl";
 
 /// One row in `decisions.jsonl`. The inner `Decision` is flattened so the JSON
-/// is grep-friendly: `kind`, `asset`, and (for Open) `side`/`notional_usd` are
+/// is grep-friendly: `kind`, `asset`, and (for Open) `notional_usd` are
 /// top-level fields alongside `decided_at` and `signal_apy`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionRecord {
     pub decided_at: DateTime<Utc>,
+    /// The smoothed (trailing-mean) APY the decision was made on.
     pub signal_apy: Decimal,
+    /// The latest hourly APY at decision time, for comparing against the
+    /// smoothed signal. Absent in records written before smoothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_apy: Option<Decimal>,
     #[serde(flatten)]
     pub decision: Decision,
 }
 
 impl DecisionRecord {
-    pub fn new(signal_apy: Decimal, decision: Decision) -> Self {
+    pub fn new(signal_apy: Decimal, raw_apy: Option<Decimal>, decision: Decision) -> Self {
         Self {
             decided_at: Utc::now(),
             signal_apy,
+            raw_apy,
             decision,
         }
     }
@@ -71,7 +77,6 @@ pub fn append(path: &Path, record: &DecisionRecord) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use perps_types::Side;
     use rust_decimal_macros::dec;
     use tempfile::TempDir;
 
@@ -82,9 +87,9 @@ mod tests {
                 .unwrap()
                 .with_timezone(&Utc),
             signal_apy: dec!(0.293),
+            raw_apy: Some(dec!(0.41)),
             decision: Decision::Open {
                 asset: "BTC".into(),
-                side: Side::Short,
                 notional_usd: dec!(1000),
             },
         };
@@ -92,9 +97,9 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&rec).unwrap()).unwrap();
         assert_eq!(v["decided_at"], "2026-05-17T00:00:00Z");
         assert_eq!(v["signal_apy"], "0.293");
+        assert_eq!(v["raw_apy"], "0.41");
         assert_eq!(v["kind"], "open");
         assert_eq!(v["asset"], "BTC");
-        assert_eq!(v["side"], "short");
         assert_eq!(v["notional_usd"], "1000");
     }
 
@@ -105,14 +110,14 @@ mod tests {
 
         let rec1 = DecisionRecord::new(
             dec!(0.20),
+            None,
             Decision::Open {
                 asset: "BTC".into(),
-                side: Side::Short,
                 notional_usd: dec!(500),
             },
         );
-        let rec2 = DecisionRecord::new(dec!(0.01), Decision::Close { asset: "BTC".into() });
-        let rec3 = DecisionRecord::new(dec!(0.05), Decision::Hold { asset: "ETH".into() });
+        let rec2 = DecisionRecord::new(dec!(0.01), None, Decision::Close { asset: "BTC".into() });
+        let rec3 = DecisionRecord::new(dec!(0.05), None, Decision::Hold { asset: "ETH".into() });
 
         append(&path, &rec1).unwrap();
         append(&path, &rec2).unwrap();

@@ -26,6 +26,49 @@ impl Side {
     }
 }
 
+/// Which market a leg trades in. A hedged carry position is two legs on the
+/// same asset: a short `Perp` (earns funding) and a long `Spot` (cancels the
+/// price exposure). Defaults to `Perp` so fills/positions written before the
+/// hedge leg existed still deserialize.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Instrument {
+    #[default]
+    Perp,
+    Spot,
+}
+
+/// Taker fee rates as a fraction of notional (0.00045 = 0.045%). Shared by
+/// the dry-run executor and the backtest so both charge the same costs.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct FeeSchedule {
+    pub perp_taker: Decimal,
+    pub spot_taker: Decimal,
+}
+
+impl FeeSchedule {
+    /// Hyperliquid base tier (no volume discount, no staking discount).
+    pub fn hyperliquid_base() -> Self {
+        Self {
+            perp_taker: Decimal::new(45, 5),
+            spot_taker: Decimal::new(70, 5),
+        }
+    }
+
+    pub fn taker_rate(&self, instrument: Instrument) -> Decimal {
+        match instrument {
+            Instrument::Perp => self.perp_taker,
+            Instrument::Spot => self.spot_taker,
+        }
+    }
+}
+
+impl Default for FeeSchedule {
+    fn default() -> Self {
+        Self::hyperliquid_base()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FundingRate {
     pub venue: Venue,
@@ -52,12 +95,19 @@ pub struct MarketSnapshot {
     pub funding: FundingRate,
     /// Mid-market price (midpoint between best bid and ask) in USD per base unit.
     pub mid_price: Decimal,
+    /// Mid of the spot market used for the hedge leg, when the venue has one
+    /// for this asset (e.g. UBTC/USDC on Hyperliquid). `None` if unmapped or
+    /// the venue didn't quote it.
+    #[serde(default)]
+    pub spot_mid_price: Option<Decimal>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Position {
     pub venue: Venue,
     pub asset: String,
+    #[serde(default)]
+    pub instrument: Instrument,
     pub side: Side,
     /// Base asset units (e.g. BTC, not USD).
     pub size: Decimal,
@@ -77,6 +127,8 @@ impl Position {
 pub struct Order {
     pub venue: Venue,
     pub asset: String,
+    #[serde(default)]
+    pub instrument: Instrument,
     pub side: Side,
     pub size: Decimal,
     /// None = market order.
@@ -89,6 +141,8 @@ pub struct Order {
 pub enum VenueError {
     #[error("network error: {0}")]
     Network(String),
+    #[error("rate limited: {0}")]
+    RateLimited(String),
     #[error("auth error: {0}")]
     Auth(String),
     #[error("rejected by venue: {0}")]
@@ -115,6 +169,23 @@ mod tests {
         };
         // 0.01% * 24 * 365 = 87.6%
         assert_eq!(fr.annualized(), dec!(0.8760));
+    }
+
+    #[test]
+    fn instrument_defaults_to_perp_for_old_records() {
+        let p: Position = serde_json::from_str(
+            r#"{"venue":"hyperliquid","asset":"BTC","side":"short","size":"1",
+                "entry_price":"100","leverage":"1","margin_used":"100","liquidation_price":null}"#,
+        )
+        .unwrap();
+        assert_eq!(p.instrument, Instrument::Perp);
+    }
+
+    #[test]
+    fn fee_schedule_picks_rate_by_instrument() {
+        let fees = FeeSchedule::hyperliquid_base();
+        assert_eq!(fees.taker_rate(Instrument::Perp), dec!(0.00045));
+        assert_eq!(fees.taker_rate(Instrument::Spot), dec!(0.00070));
     }
 
     #[test]

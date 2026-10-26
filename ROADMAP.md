@@ -24,6 +24,7 @@ Phased build. Each phase ends with something runnable and observable. No phase a
 - `perps-risk` computes notional balance, simulated margin usage, would-be liquidation prices.
 - Daily PnL attribution: funding earned vs. fees vs. slippage vs. hedge drift.
 - Exit criterion: 2 weeks of paper trading on testnet, simulated PnL roughly matches reality (compare to CoinGlass funding rates).
+- Done 2026-10-26: hedge leg (short perp + long spot), 7-day trailing funding signal, taker fees on fills, and a fee-aware `perps-bot backtest` against mainnet history. See devlog.
 
 ## Phase 3 — Risk module hardening
 
@@ -50,5 +51,5 @@ Phased build. Each phase ends with something runnable and observable. No phase a
 ## Out of scope (for now)
 
 - On-chain leg (Aave borrow, Lido stake) — defer until CEX leg is rock-solid.
-- Spot-perp arb (the cash-and-carry variant) — same; defer.
+- Live spot routing for the hedge leg — `place_order` refuses spot orders until it's wired (Phase 4).
 - ML-driven funding forecasts — threshold rules first, fancy stuff later.
